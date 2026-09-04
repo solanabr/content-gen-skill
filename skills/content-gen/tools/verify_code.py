@@ -47,8 +47,12 @@ def _run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=kw.pop("timeout", 120), **kw)
 
 
-def extract_blocks(md: str):
-    """Yield (lang, code) for every non-visual fenced block with a known language."""
+def extract_blocks(md: str, keep_info: bool = False):
+    """Yield (lang, code) for every non-visual fenced block with a known language.
+
+    keep_info=True yields (lang, code, info) so callers can recover the raw fence tag
+    that LANGS collapses (e.g. tsx -> typescript, which needs a .tsx compile target).
+    """
     lines, i, out = md.split("\n"), 0, []
     while i < len(lines):
         s = lines[i].strip()
@@ -59,7 +63,8 @@ def extract_blocks(md: str):
                 body.append(lines[j]); j += 1
             lang = LANGS.get(info)
             if lang:
-                out.append((lang, "\n".join(body)))
+                out.append((lang, "\n".join(body), info) if keep_info
+                           else (lang, "\n".join(body)))
             i = j + 1
         else:
             i += 1
@@ -211,8 +216,11 @@ def run_docker(target, extra):
               f"skills/content-gen/tools/verify_code.py {target} --env local {extra}", file=sys.stderr)
         return 2
     repo = HERE.parent.parent.parent
-    cmd = ["docker", "run", "--rm", "-v", f"{repo}:/work", "-w", "/work", IMAGE,
-           "python3", "skills/content-gen/tools/verify_code.py", target, "--env", "local"] + extra.split()
+    # --entrypoint: the image's ENTRYPOINT is already this script; without the override the
+    # command below would be appended to it and every argument would arrive duplicated.
+    cmd = ["docker", "run", "--rm", "--entrypoint", "python3",
+           "-v", f"{repo}:/work", "-w", "/work", IMAGE,
+           "skills/content-gen/tools/verify_code.py", target, "--env", "local"] + extra.split()
     return subprocess.run(cmd).returncode
 
 

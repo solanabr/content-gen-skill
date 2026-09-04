@@ -20,13 +20,22 @@ ARG SOLANA=v2.1.0            # Agave CLI; set to the release the content declare
 ARG ANCHOR=0.31.1            # anchor-cli / avm; set to the declared version (e.g. 1.1.2) when the content targets it
 ARG FOUNDRY=stable
 ARG SOLIDITY=0.8.28
+ARG BITCOIN=27.1               # Bitcoin Core (official binaries; Ubuntu 24.04 no longer packages bitcoind)
 
 ENV DEBIAN_FRONTEND=noninteractive PATH="/root/.cargo/bin:/root/.foundry/bin:/root/.local/share/solana/install/active_release/bin:/root/.avm/bin:${PATH}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates git build-essential pkg-config libssl-dev libudev-dev \
-      python3 python3-pip bitcoind \
+      python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
+
+# bitcoind — Ubuntu 24.04 dropped the apt package; install the official Bitcoin Core binaries
+RUN arch="$(uname -m)"; case "$arch" in x86_64) tgt=x86_64-linux-gnu ;; aarch64) tgt=aarch64-linux-gnu ;; *) echo "unsupported arch $arch" && exit 1 ;; esac; \
+    curl -fsSL "https://bitcoincore.org/bin/bitcoin-core-${BITCOIN}/bitcoin-${BITCOIN}-${tgt}.tar.gz" \
+      | tar -xz -C /opt && \
+    ln -s /opt/bitcoin-${BITCOIN}/bin/bitcoind /usr/local/bin/bitcoind && \
+    ln -s /opt/bitcoin-${BITCOIN}/bin/bitcoin-cli /usr/local/bin/bitcoin-cli && \
+    bitcoind --version | head -1
 
 # Node + TypeScript runner
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - && apt-get install -y nodejs \
@@ -43,8 +52,13 @@ RUN curl -L https://foundry.paradigm.xyz | bash && /root/.foundry/bin/foundryup 
 RUN sh -c "$(curl -sSfL https://release.anza.xyz/${SOLANA}/install)" || \
     sh -c "$(curl -sSfL https://release.solana.com/${SOLANA}/install)"
 # avm now lives under the solana-foundation org (migrated from coral-xyz)
+# No prebuilt anchor binaries exist for linux/arm64, so fall back to --from-source there.
+# The from-source build disables the release profile's LTO/codegen-units=1 (memory blowout
+# that SIGTRAPs rustc in an 8 GB Docker VM); this changes only the CLI binary's optimization.
 RUN cargo install --git https://github.com/solana-foundation/anchor avm --force && \
-    avm install ${ANCHOR} && avm use ${ANCHOR}
+    ( avm install ${ANCHOR} || \
+      CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_BUILD_JOBS=4 \
+      avm install ${ANCHOR} --from-source ) && avm use ${ANCHOR}
 
 WORKDIR /work
 # Default: verify a course dir passed as CMD; see the header for the full command.

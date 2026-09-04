@@ -43,7 +43,12 @@ TS_PINS = {
 }
 # Packages that ship no types of their own: without these every use is a TS7016 SKIP, which
 # would quietly hide real type errors in the surrounding lesson code.
-TS_TYPES_FOR = {"express": "@types/express", "cors": "@types/cors", "ws": "@types/ws"}
+TS_TYPES_FOR = {"express": "@types/express", "cors": "@types/cors", "ws": "@types/ws",
+                "react": "@types/react", "react-dom": "@types/react-dom"}
+
+# gather() prepends this to blocks whose fence tag was `tsx` (extract_blocks collapses the tag
+# to "typescript"); the writer strips it and compiles those blocks as .tsx with JSX enabled.
+TSX_MARK = "//tsx\n"
 RUST_PINS = {
     "anchor_lang": ("anchor-lang", "=2.0.0-rc.1"),
     "anchor_spl": ("anchor-spl", "=2.0.0-rc.1"),
@@ -65,11 +70,12 @@ RUST_MACRO_DEPS = {"bytemuck", "wincode"}
 RUST_NOT_CRATES = {"crate", "self", "super", "std", "core", "alloc"}
 
 
-def _rust_dep_line(crate: str, ver: str, git_src: dict) -> str:
+def _rust_dep_line(crate: str, ver: str, git_src: dict, course_feats: dict = None) -> str:
     """One [dependencies] line: a git inline table, a features table, or a plain version."""
     if crate in git_src:
         return f"{crate} = {git_src[crate]}"
-    feats = RUST_FEATURES.get(crate)
+    feats = sorted(set(RUST_FEATURES.get(crate, []))
+                   | set((course_feats or {}).get(crate, [])))
     if feats:
         return f'{crate} = {{ version = "{ver}", features = [{", ".join(chr(34) + f + chr(34) for f in feats)}] }}'
     return f'{crate} = "{ver}"'
@@ -96,7 +102,16 @@ RUST_UNRESOLVED = re.compile(
     r"|failed to resolve"
     r"|use of undeclared"
     r"|error\[E0583\]"          # `mod x;` whose file the snippet never ships
+    # E0423 "expected value, found macro `line`": the fragment's own binding (`for line in …`)
+    # lives in the prose above it, so the bare name falls through to a std macro of the same
+    # name. That is a missing binding wearing a confusing hat, not a defect.
+    r"|error\[E0423\]: expected value, found macro"
 )
+# Inference that the removed context would have supplied. Only ever applied to blocks THIS TOOL
+# wrapped: `let (k, v) = pair.split_once('=')` cannot be typed once `pair` is gone, and rustc
+# reports the consequence (E0282) rather than the cause. In a self-contained block the same
+# diagnostic is the author's to fix, so `standalone` never gets this discount.
+WRAPPED_INFERENCE = re.compile(r"error\[E028[23]\]|type annotations needed")
 
 
 def classify_ts(code: str) -> str:
@@ -114,16 +129,22 @@ def classify_ts(code: str) -> str:
 
 
 RUST_FIELD = re.compile(r"^\s*(?:pub\s+)?[\w_]+\s*:\s*[^;=]+,\s*(?://.*)?$")
+# One enum variant per line: `Pending,` · `BadConfig(serde_json::Error),` · `Probe { url: String },`
+# The trailing comma is load-bearing — it is what keeps match arms (`Some(x) => y,`) out.
+RUST_VARIANT = re.compile(
+    r"^\s*[A-Z]\w*(\s*\((?:[^()]|\([^()]*\))*\))?(\s*\{[^{}]*\})?\s*,\s*(?://.*)?$")
 
 
 def classify_rust(code: str) -> str:
-    """standalone | item | fields | method | body.
+    """standalone | item | fields | variants | assoc | method | body.
 
     `fields` and `method` exist because the naive split gets them catastrophically wrong: a bare
     field list (`pub owner: Address,` …) lifted out of a struct is not a statement sequence, and
     wrapping it in a function yields "visibility `pub` is not followed by an item" — a harness
     artifact that was the single largest failure class before this existed. Likewise a method body
-    using `self` needs an impl to live in, not a free function.
+    using `self` needs an impl to live in, not a free function. `variants` is the same shape one
+    level over: an enum grows by the variant the way a struct grows by the field, and a lesson
+    that prints only the new variant is showing an edit, not a broken item.
     """
     if re.search(r"^\s*(use\s+anchor_lang|declare_id!|fn\s+main\s*\()", code, re.M):
         return "standalone"
@@ -133,13 +154,20 @@ def classify_rust(code: str) -> str:
         return "body"
     if all(RUST_FIELD.match(l) for l in meaningful):
         return "fields"
+    if all(RUST_VARIANT.match(l) for l in meaningful):
+        return "variants"
     first = meaningful[0].lstrip()
     if re.match(r"(pub\s+(struct|enum|fn|mod|const|static|type|trait|use)|struct\s|enum\s|impl\s"
                 r"|trait\s|fn\s|mod\s|use\s|const\s|static\s|type\s)", first) \
             or code.lstrip().startswith("#["):
         # A method printed without the `impl` that owns it is still an item — but wrapping it at
-        # item level makes rustc reject `self`. Give it an impl to live in instead.
-        if re.search(r"fn\s+\w+\s*(<[^>]*>)?\s*\([^)]*\bself\b", code) and not re.search(r"\bimpl\b", code):
+        # item level makes rustc reject `self`. Give it an impl to live in instead. Only a block
+        # whose FIRST item is that bare fn qualifies: a `trait` declaration also holds
+        # `fn f(&self)` signatures, and forcing one into an impl produces "trait is not supported
+        # in `impl`s", a syntax complaint about a block whose syntax is perfect.
+        if re.match(r"(pub(\([^)]*\))?\s+)?fn\s", first) \
+                and re.search(r"fn\s+\w+\s*(<[^>]*>)?\s*\([^)]*\bself\b", code) \
+                and not re.search(r"\bimpl\b", code):
             return "assoc"
         return "item"
     if re.search(r"\bself\b", code):
@@ -217,28 +245,82 @@ CARGO_DEP = re.compile(r"^\s*([a-z][a-z0-9_-]*)\s*=\s*\"([=^~]?\d[\w.\-]*)\"\s*$
 CARGO_DEP_TABLE = re.compile(r"^\s*([a-z][a-z0-9_-]*)\s*=\s*\{[^}]*?version\s*=\s*\"([=^~]?\d[\w.\-]*)\"", re.M)
 
 
-def crate_exists(name: str, _cache={}) -> bool:
-    """Is this crate on crates.io? Unknown (network trouble) counts as yes — cargo decides.
+def crate_name(name: str, _cache={}) -> str:
+    """The name crates.io actually publishes for `name`, or "" when nothing does.
 
-    Pre-filtering matters because cargo names only ONE missing package per attempt, so a course
-    that `use`s six of its own workspace crates would need six full resolution rounds to converge.
+    Two jobs in one lookup. First, existence: cargo names only ONE missing package per attempt,
+    so a course that `use`s six of its own workspace crates would need six full resolution rounds
+    to converge; pre-filtering collapses that to zero. Second, SPELLING: `use serde_json::` names
+    a module path, and dash-for-underscore guessing invents `serde-json`, which cargo refuses
+    outright ("no matching package found") — one wrong guess used to take the entire dependency
+    graph down with it, dropping the course's real crates and turning every block that needed one
+    into a cascade of invented failures. crates.io normalises the lookup and answers with the
+    published spelling, so ask it.
+
+    Network trouble is not evidence of absence: fall back to the dash guess and let cargo decide.
     """
     if name in _cache:
         return _cache[name]
+    guess = name.replace("_", "-")
     try:
         import urllib.request
         req = urllib.request.Request(f"https://crates.io/api/v1/crates/{name}",
                                      headers={"User-Agent": "content-gen-verify/1.0"})
         with urllib.request.urlopen(req, timeout=15) as r:
-            _cache[name] = r.status == 200
+            body = json.loads(r.read().decode("utf-8"))
+            _cache[name] = (body.get("crate") or {}).get("name") or guess
     except Exception as e:
-        _cache[name] = "404" not in str(e)
+        _cache[name] = "" if "404" in str(e) else guess
     return _cache[name]
+
+
+def _missing_from_cargo_errors(text: str) -> set:
+    """Package names cargo reported as unresolvable, across cargo's error dialects.
+
+    The newest one puts the name on a CONTINUATION line:
+
+        error: no matching package found
+        searched package name: `serde-json`
+        perhaps you meant:      serde_json
+
+    Missing that shape is expensive out of all proportion to its size: the drop-and-retry loop
+    never fires, resolution "fails for an unknown reason", and the run falls back to the framework
+    floor — discarding every crate the course actually teaches. Blocks then fail on cascades
+    (`no method named context`, `no function named parse`) that no reader would ever see.
+    """
+    found = set(re.findall(r"no matching package (?:named )?`([^`]+)`", text))
+    found |= set(re.findall(r"could not find `([^`]+)` in registry", text))
+    found |= set(re.findall(r"no matching package found\s*\n\s*searched package name:\s*`?([^`\s]+)`?",
+                            text))
+    return found
 
 
 # `anchor-lang = { git = "https://github.com/otter-sec/anchor.git", branch = "anchor-next" }`
 CARGO_GIT = re.compile(
     r"^\s*([a-z][a-z0-9_-]*)\s*=\s*\{[^}]*?git\s*=\s*\"([^\"]+)\"([^}]*)\}", re.M)
+
+
+def harvest_rust_crates(blocks, taught: dict) -> set:
+    """Which crates the harness must depend on for these blocks to mean anything.
+
+    Three sources of noise this filters, each of which cost a run before it existed:
+      * `use ProbeState::*;` inside a fn imports an ENUM, not a crate. Crate names in a path are
+        lowercase; an uppercase head is always a type in scope.
+      * `mod engine;` makes the following `use engine::` a file in the reader's own crate. Left
+        alone, the harness adds whatever stranger's crate holds that name on crates.io and lets it
+        answer for the lesson's module.
+      * a crate the course DECLARES and then calls by path only (`reqwest::blocking::Client`,
+        never `use reqwest::`) is as real a dependency as any import. Both signals are required,
+        which keeps out the pins a lesson merely quotes to be read — sqlx, in this course's
+        "read three real-world dependency lines" exercise — and never installs.
+    """
+    crates, paths, local_mods = set(), set(), set()
+    for _f, _n, code, _k in blocks:
+        crates |= set(re.findall(r"^\s*use\s+([a-z][\w]*)\s*::", code, re.M))
+        paths |= set(re.findall(r"(?<![\w:.])([a-z][a-z0-9_]{2,})::", code))
+        local_mods |= set(re.findall(r"^\s*(?:pub\s+)?mod\s+([a-z][\w]*)\s*[;{]", code, re.M))
+    crates |= {c for c in taught if c.replace("-", "_") in paths}
+    return crates - RUST_NOT_CRATES - local_mods - {m.replace("_", "-") for m in local_mods}
 
 
 def harvest_rust_git(md_texts) -> dict:
@@ -267,8 +349,20 @@ def harvest_rust_git(md_texts) -> dict:
     return out
 
 
+def _ver_key(v: str):
+    """'4.6' -> (4, 6). Sorts version strings numerically for the tie-break below."""
+    return tuple(int(p) for p in re.findall(r"\d+", v)[:4])
+
+
 def harvest_rust_pins(md_texts) -> dict:
-    """Crate -> version, read from the Cargo.toml blocks the course prints."""
+    """Crate -> version, read from the Cargo.toml blocks the course prints.
+
+    Ties go to the HIGHER version. Courses quote old pins as teaching material — this one prints
+    `clap = "2.33.1"` in a "read three real-world dependency lines" exercise and
+    `clap = { version = "4.6", features = ["derive"] }` as the line the reader actually adds, one
+    mention each. First-seen wins would check the reader's clap-4 derive code against clap 2, where
+    `Parser` does not exist, and report the lesson as broken.
+    """
     counts = {}
     for text in md_texts:
         for lang, code in extract_blocks(text):
@@ -278,20 +372,60 @@ def harvest_rust_pins(md_texts) -> dict:
                 for crate, ver in rx.findall(code):
                     counts.setdefault(crate, {}).setdefault(ver, 0)
                     counts[crate][ver] += 1
-    return {c: max(v.items(), key=lambda kv: kv[1])[0] for c, v in counts.items()}
+    return {c: max(v.items(), key=lambda kv: (kv[1], _ver_key(kv[0])))[0]
+            for c, v in counts.items()}
+
+
+# `clap = { version = "4.6", features = ["derive"] }` — the feature list on one dependency line.
+CARGO_FEATURES = re.compile(
+    r"^\s*([a-z][a-z0-9_-]*)\s*=\s*\{([^}]*)\}", re.M | re.S)
+
+
+def harvest_rust_features(md_texts, pins: dict) -> dict:
+    """Crate -> [features], from the course's own dependency lines.
+
+    A pin without its features checks different code than the reader compiles: `clap = "4.6"`
+    with no `derive` makes `#[derive(Parser)]` an unresolved macro, `serde` without `derive`
+    does the same to `Serialize`, and both land as SKIPs that quietly retire real verification.
+    Only lines carrying the winning version count, so a counter-example pin cannot donate its
+    features. `default-features = false` is deliberately ignored: the harness wants the largest
+    surface the course names anywhere, not the smallest one workspace happens to need.
+    """
+    out = {}
+    for text in md_texts:
+        for lang, code in extract_blocks(text):
+            if lang != "toml":
+                continue
+            for crate, body in CARGO_FEATURES.findall(code):
+                ver = re.search(r"version\s*=\s*\"([=^~]?\d[\w.\-]*)\"", body)
+                if crate in pins and ver and ver.group(1) != pins[crate]:
+                    continue
+                feats = re.search(r"features\s*=\s*\[([^\]]*)\]", body)
+                if feats:
+                    out.setdefault(crate, set()).update(
+                        f.strip().strip("\"'") for f in feats.group(1).split(",")
+                        if f.strip().strip("\"'") and not f.strip().startswith("#"))
+    return {k: sorted(v) for k, v in out.items() if v}
 
 
 # A string literal holding an angle-bracketed instruction: declare_id!("<your program id>"),
 # pubkey!("<paste your generated pubkey>"). Generics never appear inside quotes, so this cannot
 # collide with real type parameters.
 PLACEHOLDER = re.compile(r"""["'][^"'\n]*<[^"'>\n]+>[^"'\n]*["']""")
+# A bare ellipsis where an expression/body belongs: `{ ... }` / `[ ... ]`. A spread always names
+# its operand (`...foo`), so an ellipsis alone can never be real code — it is the author eliding.
+ELLIPSIS_HOLE = re.compile(r"[\{\[]\s*\.\.\.\s*[\}\]]")
 
 
 def has_placeholder(code: str) -> str:
     """'' or a reason: the block asks the reader to paste something before it can build."""
     m = PLACEHOLDER.search(code)
-    return (f"block contains an intentional reader placeholder {m.group(0)[:40]} — "
-            "uncompilable by design") if m else ""
+    if m:
+        return (f"block contains an intentional reader placeholder {m.group(0)[:40]} — "
+                "uncompilable by design")
+    if ELLIPSIS_HOLE.search(code):
+        return "block elides a body with a bare `...` — uncompilable by design"
+    return ""
 
 
 def unbalanced(code: str) -> str:
@@ -314,13 +448,27 @@ def _spec_name(spec: str) -> str:
     return spec[:at] if at > 0 else spec
 
 
+def _missing_from_npm_errors(text: str) -> set:
+    """Package names npm reported as unavailable, across npm error dialects.
+
+    npm <=10: `404 '<spec>' is not in this registry`
+    npm >=11: `404  The requested resource '<spec>' could not be found or you do not
+    have permission to access it.` — one shape for both unpublished names and
+    invalid ones (e.g. the publish-lesson placeholder '@YOUR_NPM_USERNAME/pkg',
+    which npm 11 rejects for capital letters before any registry lookup).
+    """
+    found = set(re.findall(r"404\s+'(\S+)' is not in this registry", text))
+    found |= set(re.findall(r"404\s+The requested resource '(\S+)' could not be found", text))
+    return {_spec_name(s) for s in found} - {""}
+
+
 def _tsc(tsc: Path, work: Path, srcdir: str, project="tsconfig.json") -> dict:
     """Run tsc over one source dir; return {filename: [diagnostic, ...]}."""
     r = subprocess.run([str(tsc), "-p", project], cwd=work,
                        capture_output=True, text=True, timeout=1800)
     out = {}
     for line in (r.stdout + r.stderr).splitlines():
-        m = re.match(rf"{srcdir}/(b\d+\.ts)\((\d+),(\d+)\):\s*(error TS\d+:.*)", line.strip())
+        m = re.match(rf"{srcdir}/(b\d+\.tsx?)\((\d+),(\d+)\):\s*(error TS\d+:.*)", line.strip())
         if m:
             out.setdefault(m.group(1), []).append(m.group(4))
     return out
@@ -454,11 +602,13 @@ def gather(course: Path, lang: str):
     out = []
     for d in drafts:
         n = 0
-        for blang, code in extract_blocks(d.read_text("utf-8")):
+        for blang, code, info in extract_blocks(d.read_text("utf-8"), keep_info=True):
             if blang != want:
                 continue
             n += 1
             kind = classify_ts(code) if lang == "ts" else classify_rust(code)
+            if lang == "ts" and info == "tsx":
+                code = TSX_MARK + code
             out.append((d.name, n, code, kind))
     return out
 
@@ -509,9 +659,7 @@ def run_ts(course: Path, blocks, work: Path, verbose=False):
             r = subprocess.run(base, cwd=work, capture_output=True, text=True, timeout=900)
             if r.returncode == 0:
                 break
-            missing = {_spec_name(s) for s in
-                       re.findall(r"404\s+'(\S+)' is not in this registry", r.stderr + r.stdout)}
-            missing.discard("")
+            missing = _missing_from_npm_errors(r.stderr + r.stdout)
             if not missing:
                 break
             dropped += sorted(missing)
@@ -540,19 +688,23 @@ def run_ts(course: Path, blocks, work: Path, verbose=False):
             "target": "ES2022", "module": "ESNext", "moduleResolution": "bundler",
             "strict": True, "noEmit": True, "skipLibCheck": True,
             "types": ["node"], "allowJs": False, "esModuleInterop": True,
+            "jsx": "react-jsx",
         },
-        "include": ["src/**/*.ts"],
+        "include": ["src/**/*.ts", "src/**/*.tsx"],
     }, indent=2))
 
     imports = collect_ts_imports(blocks)
     defaults = collect_ts_defaults(blocks)
     index, pre_rows = {}, []
     for i, (f, n, code, kind) in enumerate(blocks):
+        tsx = code.startswith(TSX_MARK)
+        if tsx:
+            code = code[len(TSX_MARK):]
         why = has_placeholder(code) or unbalanced(code)
         if why:
             pre_rows.append({"file": f, "block": n, "kind": kind, "status": "SKIP", "detail": why})
             continue
-        name = f"b{i:04d}.ts"
+        name = f"b{i:04d}.tsx" if tsx else f"b{i:04d}.ts"
         index[name] = (f, n, kind)
         if kind == "standalone":
             body = code
@@ -589,7 +741,7 @@ def run_ts(course: Path, blocks, work: Path, verbose=False):
         for name, body in retry.items():
             (src2 / name).write_text(body)
         (work / "tsconfig2.json").write_text(json.dumps({
-            "extends": "./tsconfig.json", "include": ["src2/**/*.ts"],
+            "extends": "./tsconfig.json", "include": ["src2/**/*.ts", "src2/**/*.tsx"],
         }, indent=2))
         d2 = _tsc(tsc, work, "src2", project="tsconfig2.json")
         promoted = 0
@@ -636,14 +788,68 @@ RUST_ANCHOR_MARKER = re.compile(
     r"|->\s*Result<[^,>]*>")           # anchor's one-parameter Result alias
 # Module 9 compares anchor against raw Pinocchio/native. That code has its own `Signer` and its own
 # `Result<T, E>`, so an anchor marker can fire on it by coincidence; these signals are decisive
-# against, and are checked first.
-RUST_NOT_ANCHOR = re.compile(r"\bProgramError\b|\bpinocchio\b|&'\w+\s+AccountInfo|\bentrypoint!")
+# against, and are checked first. workers-rs is the same collision in a non-Solana course: a
+# Cloudflare handler is `#[event(fetch)]` over `worker::{Request, Response, Context}`, every token
+# of which the anchor markers above also claim. Inject the prelude there and anchor's `#[event]`
+# macro answers for the worker crate's, rejecting a correct handler with "unknown `#[event]`
+# mode — only `bytemuck` is accepted": a verdict about a framework the lesson never mentions.
+RUST_NOT_ANCHOR = re.compile(r"\bProgramError\b|\bpinocchio\b|&'\w+\s+AccountInfo|\bentrypoint!"
+                             r"|\bworker(_macros)?::|\buse\s+worker\b|#\[event\((fetch|scheduled|start)")
 
 
 def rust_preamble(code: str) -> str:
     if RUST_NOT_ANCHOR.search(code):
         return RUST_BARE_PREAMBLE
     return RUST_ITEM_PREAMBLE if RUST_ANCHOR_MARKER.search(code) else RUST_BARE_PREAMBLE
+
+
+def rust_wrap(kind: str, code: str) -> str:
+    """The one source file this block gets compiled as: preamble, shell, code.
+
+    The shell is a guess at the context the lesson removed, so it is built to be RECOGNISABLE
+    when it guesses wrong — every synthetic name starts `__Block`, which verdict() discounts.
+    """
+    pre = rust_preamble(code)
+    anchor = pre is RUST_ITEM_PREAMBLE
+    # The error type is fabricated, so name it after the wrapper. A fragment lifted out of
+    # `fn parse(..) -> Result<Config, String>` still says `return Err(format!(..))`, and one out
+    # of an HTTP arm still says `send().await?`; against a guessed `()` both report a type error
+    # the reader never sees. Naming it __BlockErr does not make those compile — it makes the
+    # resulting diagnostic SAY it is about this harness's scaffolding. Anchor blocks keep anchor's
+    # own Result: there the error type is not a guess, it is the framework's, and `?` against it
+    # must stay checkable.
+    err_decl = "" if anchor else "struct __BlockErr;\n"
+    ret = "anchor_lang::Result<()>" if anchor else "std::result::Result<(), __BlockErr>"
+    # Two contexts a fragment routinely loses, both cheap to restore and both otherwise fatal:
+    # `.await` needs an async fn (E0728) and `continue`/`break` need a loop (E0268). The TS side
+    # has always wrapped fragments in `async function` for exactly this reason. The loop is
+    # conditional where async is not, because an unconditional loop would invent a second
+    # iteration and with it E0382 moved-value errors that belong to no one.
+    loop_open, loop_close = "", ""
+    if re.search(r"\b(continue|break)\b", code) and not re.search(r"\b(loop|for|while)\b", code):
+        loop_open, loop_close = "for __i in 0..1 {\n", "}\n"
+    if kind == "standalone":
+        body = RUST_BARE_PREAMBLE + code
+    elif kind == "item":
+        body = pre + code
+    elif kind == "fields":
+        body = pre + "pub struct __Block {\n" + code + "\n}\n"
+    elif kind == "variants":
+        body = pre + "pub enum __Block {\n" + code + "\n}\n"
+    elif kind == "assoc":
+        body = pre + "struct __Block;\nimpl __Block {\n" + code + "\n}\n"
+    elif kind == "method":
+        body = (pre + err_decl + "struct __Block;\nimpl __Block {\n"
+                + f"async fn __block(&self) -> {ret} {{\n" + loop_open + code
+                + "\n" + loop_close + "    Ok(())\n}\n}\n")
+    else:
+        body = (pre + err_decl + f"async fn __block() -> {ret} {{\n" + loop_open + code
+                + "\n" + loop_close + "    Ok(())\n}\n")
+    if "declare_id!" not in body and "#[program]" in body:
+        body = body.replace("use anchor_lang::prelude::*;",
+                            "use anchor_lang::prelude::*;\n"
+                            'declare_id!("11111111111111111111111111111111");', 1)
+    return body
 
 # Rustc summary lines ("could not compile X due to 2 previous errors") carry no diagnostic of
 # their own; counting them as findings both double-reports and, when the real diagnostics land
@@ -668,25 +874,29 @@ def _cargo_errors(stdout: str):
         if not msg or _CARGO_SUMMARY.match(msg):
             continue
         code = ((d.get("code") or {}) or {}).get("code") or ""
-        errs.append(f"error[{code}]: {msg}" if code else f"error: {msg}")
+        # The primary span's label carries the types. "mismatched types" alone is useless in a
+        # report AND undecidable in triage: only the label says whether the mismatch is against
+        # the reader's types or against `__BlockErr`, the return type this harness invented
+        # ("expected `__BlockErr`, found `String`").
+        label = next((s.get("label") for s in (d.get("spans") or [])
+                      if s.get("is_primary") and s.get("label")), "")
+        head = f"error[{code}]: {msg}" if code else f"error: {msg}"
+        errs.append(f"{head} — {label}" if label else head)
     return errs
 
 
 def run_rust(course: Path, blocks, work: Path, verbose=False):
-    crates = set()
-    for _f, _n, code, _k in blocks:
-        for c in re.findall(r"^\s*use\s+([a-zA-Z_][\w]*)\s*::", code, re.M):
-            if c not in RUST_NOT_CRATES:
-                crates.add(c)
     md_texts = [p.read_text("utf-8") for p in sorted((course / "lessons" / "drafts").glob("*.md"))]
     taught = harvest_rust_pins(md_texts)
+    feats = harvest_rust_features(md_texts, taught)
+    crates = harvest_rust_crates(blocks, taught)
     git_src = harvest_rust_git(md_texts)
     if git_src:
         print("[rust] course sources from git (using it, not crates.io): "
               + ", ".join(sorted(git_src)), flush=True)
     deps = {}
     for c in sorted(crates):
-        name, ver = RUST_PINS.get(c, (c.replace("_", "-"), "*"))
+        name, ver = RUST_PINS.get(c, (crate_name(c) or c.replace("_", "-"), "*"))
         # The course's own Cargo.toml wins over this file's defaults — same reason as the npm
         # pins: checking against a version the course never names tests the wrong thing.
         deps[name] = taught.get(name, ver)
@@ -701,7 +911,7 @@ def run_rust(course: Path, blocks, work: Path, verbose=False):
     # bug. (The genuine layout bug, implicit padding, reports E0080 instead, and still does.)
     if any(re.search(r"#\[(account\([^)]*)?zero_copy", code) for _f, _n, code, _k in blocks):
         deps.setdefault("bytemuck", taught.get("bytemuck", RUST_PINS["bytemuck"][1]))
-    absent = sorted(c for c in deps if not crate_exists(c))
+    absent = sorted(c for c in deps if not crate_name(c))
     for c in absent:
         deps.pop(c, None)
     if absent:
@@ -710,10 +920,13 @@ def run_rust(course: Path, blocks, work: Path, verbose=False):
     if taught:
         print("[rust] course-taught pins: "
               + ", ".join(f"{k}={v}" for k, v in sorted(taught.items()) if k in deps), flush=True)
+    if feats:
+        print("[rust] course-taught features: "
+              + ", ".join(f"{k}={v}" for k, v in sorted(feats.items()) if k in deps), flush=True)
 
     work.mkdir(parents=True, exist_ok=True)
     (work / "src").mkdir(exist_ok=True)
-    dep_lines = "\n".join(_rust_dep_line(k, v, git_src) for k, v in sorted(deps.items()))
+    dep_lines = "\n".join(_rust_dep_line(k, v, git_src, feats) for k, v in sorted(deps.items()))
     (work / "Cargo.toml").write_text(
         "[package]\nname = \"block-harness\"\nversion = \"0.0.0\"\nedition = \"2021\"\n"
         "\n[lib]\npath = \"src/lib.rs\"\n"
@@ -732,7 +945,7 @@ def run_rust(course: Path, blocks, work: Path, verbose=False):
             "[package]\nname = \"block-harness\"\nversion = \"0.0.0\"\nedition = \"2021\"\n"
             "\n[lib]\npath = \"src/lib.rs\"\n"
             "\n[dependencies]\n"
-            + "\n".join(_rust_dep_line(k, v, git_src) for k, v in sorted(ds.items())) + "\n"
+            + "\n".join(_rust_dep_line(k, v, git_src, feats) for k, v in sorted(ds.items())) + "\n"
         )
         print(f"[rust] warming {len(ds)} deps ({', '.join(sorted(ds))}) …", flush=True)
         warm = subprocess.run(["cargo", "check", "--quiet"], cwd=work,
@@ -745,8 +958,7 @@ def run_rust(course: Path, blocks, work: Path, verbose=False):
         # them by name. Those are not registry crates; drop them and let blocks that need them
         # resolve to SKIP. Names that are NOT course artifacts but still missing are reported —
         # a lesson telling readers to depend on a crate that does not exist is a content bug.
-        miss = set(re.findall(r"no matching package (?:named )?`([^`]+)`", out))
-        miss |= set(re.findall(r"could not find `([^`]+)` in registry", out))
+        miss = set(_missing_from_cargo_errors(out))
         if miss:
             for m in miss:
                 ds.pop(m, None)
@@ -827,27 +1039,7 @@ def run_rust(course: Path, blocks, work: Path, verbose=False):
             if verbose:
                 print(f"  {f} #{n} [{kind}] -> SKIP ({why})", flush=True)
             continue
-        pre = rust_preamble(code)
-        anchor = pre is RUST_ITEM_PREAMBLE
-        ret = "anchor_lang::Result<()>" if anchor else "std::result::Result<(), ()>"
-        if kind == "standalone":
-            body = RUST_BARE_PREAMBLE + code
-        elif kind == "item":
-            body = pre + code
-        elif kind == "fields":
-            body = pre + "pub struct __Block {\n" + code + "\n}\n"
-        elif kind == "assoc":
-            body = pre + "struct __Block;\nimpl __Block {\n" + code + "\n}\n"
-        elif kind == "method":
-            body = (pre + "struct __Block;\nimpl __Block {\n"
-                    + f"fn __block(&self) -> {ret} {{\n" + code + "\n    Ok(())\n}\n}\n")
-        else:
-            body = pre + f"fn __block() -> {ret} {{\n" + code + "\n    Ok(())\n}\n"
-        if "declare_id!" not in body and "#[program]" in body:
-            body = body.replace("use anchor_lang::prelude::*;",
-                                "use anchor_lang::prelude::*;\n"
-                                'declare_id!("11111111111111111111111111111111");', 1)
-        (work / "src" / "lib.rs").write_text(body)
+        (work / "src" / "lib.rs").write_text(rust_wrap(kind, code))
         r = subprocess.run(["cargo", "check", "--message-format", "json"],
                            cwd=work, capture_output=True, text=True, timeout=600)
         errs = _cargo_errors(r.stdout)
@@ -882,6 +1074,13 @@ def verdict(f, n, kind, errs, unresolved_re, advisory_re=None):
         if syntax:
             return {**row, "status": "SKIP",
                     "detail": f"snippet did not survive harness wrapping ({kind}): {syntax[0][:150]}"}
+        infer = [e for e in errs if WRAPPED_INFERENCE.search(e)]
+        if infer:
+            errs = [e for e in errs if e not in infer]
+            if not errs:
+                return {**row, "status": "SKIP",
+                        "detail": "inference needs context the fragment does not carry: "
+                                  + infer[0][:150]}
     # Any complaint about the synthesized `__Block` type is by definition about scaffolding this
     # tool invented (a method body wrapped in an empty struct), never about the lesson's code.
     if any("__Block" in e for e in errs):
@@ -949,6 +1148,27 @@ def selftest() -> int:
         "rust bare method with self -> assoc (needs an impl, not item level)")
     chk(classify_rust("impl V {\n pub fn credit(&self) -> u64 { self.credit }\n}") == "item",
         "rust method already inside impl stays item")
+    chk(classify_rust("pub trait ProbeSource {\n    fn next_latency(&mut self) -> Option<u64>;\n}")
+        == "item", "rust trait declaration stays item (an impl wrapper would reject its own fns)")
+    chk(classify_rust("    #[error(\"config rejected: {0}\")]\n    BadConfig(serde_json::Error),")
+        == "variants", "rust bare enum variant -> variants (an enum grows the way a struct does)")
+    chk(classify_rust("    Pending,\n    Up,\n    Down,") == "variants", "rust plain variant list")
+    chk(classify_rust("match x {\n    Some((k, v)) => (k, v),\n    None => return,\n}") != "variants",
+        "match arms are not variants (the trailing comma alone must not decide)")
+    chk(has_placeholder("export const c = { ... };") != "", "bare object ellipsis -> placeholder SKIP")
+    chk(has_placeholder("const c = { ...defaults, a: 1 };") == "", "real spread is NOT a placeholder")
+    ki = extract_blocks("```tsx\nexport function P() { return <div/> }\n```\n", keep_info=True)
+    chk(ki and ki[0][0] == "typescript" and ki[0][2] == "tsx",
+        "extract_blocks keep_info preserves the tsx fence tag")
+    chk(extract_blocks("```ts\nconst a = 1;\n```\n") == [("typescript", "const a = 1;")],
+        "extract_blocks default shape unchanged (2-tuples)")
+    chk(_missing_from_npm_errors("npm error 404 'pulse-core@latest' is not in this registry")
+        == {"pulse-core"}, "npm10 404 shape -> missing pkg")
+    chk(_missing_from_npm_errors(
+        "npm error 404  The requested resource '@YOUR_NPM_USERNAME/pulse-core@latest' could not "
+        "be found or you do not have permission to access it.")
+        == {"@YOUR_NPM_USERNAME/pulse-core"},
+        "npm11 404 shape (incl. invalid placeholder names) -> missing pkg")
     chk(classify_ts("getInstruction({ a: 1 }),") == "fragment", "ts trailing-comma splice -> fragment")
     chk(classify_ts("import x from 'y';\nconst a = x();") == "standalone", "ts real module -> standalone")
     v = verdict("f.md", 1, "item", ["error: cannot find derive macro `Accounts` in this scope"],
@@ -980,6 +1200,37 @@ def selftest() -> int:
     g = harvest_rust_git(['```toml\nanchor-spl-v2 = { git = "https://x/y.git", rev = "abc123" }\n```'])
     chk("anchor-spl" in g and 'rev = "abc123"' in g["anchor-spl"],
         "the -v2 crate-name suffix is normalised and rev is kept")
+    bl = [("a.md", 1, "mod engine;\nuse engine::ProbeError;\nuse serde_json::Value;", "item"),
+          ("a.md", 2, "use ProbeState::*;\nlet c = reqwest::blocking::Client::new();", "body")]
+    cr = harvest_rust_crates(bl, {"reqwest": "0.13", "sqlx": "0.6.2"})
+    chk("serde_json" in cr, "crate harvest: a plain import is a dependency")
+    chk("reqwest" in cr, "crate harvest: declared by the course AND called by path -> dependency")
+    chk("sqlx" not in cr, "crate harvest: a pin the course only quotes to be read is NOT installed")
+    chk("engine" not in cr, "crate harvest: `mod engine;` means the reader's own file, not a crate")
+    chk("ProbeState" not in cr, "crate harvest: `use ProbeState::*` imports an enum, not a crate")
+    chk(_missing_from_cargo_errors("error: no matching package named `pulse-engine` found")
+        == {"pulse-engine"}, "cargo: classic missing-package dialect")
+    chk(_missing_from_cargo_errors(
+        "error: no matching package found\n  searched package name: `serde-json`\n"
+        "  perhaps you meant:      serde_json\n") == {"serde-json"},
+        "cargo: continuation-line dialect (one miss used to collapse the whole graph)")
+    p = harvest_rust_pins(['```toml\nclap = { version = "2.33.1", default-features = false }\n```',
+                           '```toml\nclap = { version = "4.6", features = ["derive"] }\n```'])
+    chk(p.get("clap") == "4.6", "pins: tie goes to the higher version, not the first seen")
+    p = harvest_rust_pins(['```toml\ntokio = "1.53"\n```', '```toml\ntokio = "1.53"\n```',
+                           '```toml\ntokio = "1.99"\n```'])
+    chk(p.get("tokio") == "1.53", "pins: a clear count still beats a higher version")
+    fe = harvest_rust_features(['```toml\nclap = { version = "2.33.1", features = ["suggestions"] }\n```',
+                                '```toml\nclap = { version = "4.6", features = ["derive"] }\n```'],
+                               {"clap": "4.6"})
+    chk(fe.get("clap") == ["derive"],
+        "features: only the winning version's features count (a quoted pin cannot donate its own)")
+    fe = harvest_rust_features(['```toml\ntokio = { version = "1.53", features = ["macros", "time"] }\n```'],
+                               {"tokio": "1.53"})
+    chk(fe.get("tokio") == ["macros", "time"], "features: harvested from the course's own line")
+    chk(_rust_dep_line("clap", "4.6", {}, {"clap": ["derive"]})
+        == 'clap = { version = "4.6", features = ["derive"] }',
+        "dep line carries the course's features (without derive, #[derive(Parser)] is a SKIP)")
     chk(has_placeholder('declare_id!("<your generated program id>");') != "",
         "reader placeholder detected -> not a content bug")
     chk(has_placeholder('let v: Vec<u8> = vec![]; let s = "ok";') == "",
@@ -998,6 +1249,38 @@ def selftest() -> int:
     chk(v["status"] == "SKIP", "rust unresolved crate -> SKIP")
     v = verdict("f.md", 1, "item", ["error[E0277]: the trait bound `V: Pod` is not satisfied"], RUST_UNRESOLVED)
     chk(v["status"] == "FAIL", "rust trait bound -> FAIL (this is the Pod question)")
+    v = verdict("f.md", 1, "body", ["error[E0423]: expected value, found macro `line`"], RUST_UNRESOLVED)
+    chk(v["status"] == "SKIP", "rust name shadowed by a std macro -> SKIP (the binding is missing)")
+    v = verdict("f.md", 1, "body", ["error[E0282]: type annotations needed for `(&str, _)`"],
+                RUST_UNRESOLVED)
+    chk(v["status"] == "SKIP", "rust inference-needs-context in a wrapped block -> SKIP")
+    v = verdict("f.md", 1, "standalone", ["error[E0282]: type annotations needed for `(&str, _)`"],
+                RUST_UNRESOLVED)
+    chk(v["status"] == "FAIL", "the same diagnostic in a self-contained block stays FAIL")
+    v = verdict("f.md", 1, "body",
+                ["error[E0308]: mismatched types — expected `__BlockErr`, found `String`"],
+                RUST_UNRESOLVED)
+    chk(v["status"] == "SKIP", "a mismatch against the harness's invented error type -> SKIP")
+    v = verdict("f.md", 1, "body",
+                ["error[E0308]: mismatched types — expected `u64`, found `&str`"], RUST_UNRESOLVED)
+    chk(v["status"] == "FAIL", "a real type error in the SAME wrapper still FAILs")
+    chk(rust_preamble("use worker::*;\n#[event(fetch)]\nasync fn fetch() -> Result<Response> {}")
+        is RUST_BARE_PREAMBLE,
+        "workers-rs block does NOT get the anchor prelude (anchor's #[event] would answer for it)")
+    w = rust_wrap("body", "let resp = client.get(url).send().await?;")
+    chk("async fn __block" in w, "an await fragment is wrapped in an ASYNC fn (E0728 was ours)")
+    chk("for __i in 0..1" not in w, "a fragment with no continue/break gets no invented loop")
+    w = rust_wrap("body", "let x = match j {\n    Ok(v) => v,\n    Err(e) => { continue; }\n};")
+    chk("for __i in 0..1" in w and "async fn __block" in w,
+        "a continue fragment gets a loop to continue out of (E0268 was ours)")
+    w = rust_wrap("body", "for l in xs {\n    if l > 3 { continue; }\n}")
+    chk("for __i in 0..1" not in w, "a fragment that brings its own loop is not double-wrapped")
+    chk("struct __BlockErr;" in rust_wrap("body", "let a = 1;"),
+        "a non-anchor body's error type is synthetic and NAMED so triage can spot it")
+    chk("anchor_lang::Result<()>" in rust_wrap("body", "let signer: Signer = ctx.accounts.payer;"),
+        "an anchor body keeps anchor's own Result (its error type is not a guess)")
+    chk("pub enum __Block {" in rust_wrap("variants", "    Pending,\n    Up,"),
+        "variants are wrapped in an enum, not a function")
     v = verdict("f.md", 1, "fragment", ["error TS7006: Parameter 'x' implicitly has an 'any' type."],
                 TS_UNRESOLVED, TS_ADVISORY)
     chk(v["status"] == "WARN", "ts implicit-any -> WARN, not FAIL (harness forces strict)")

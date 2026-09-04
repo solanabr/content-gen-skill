@@ -9,9 +9,9 @@ block-based shape (references/academy-schema.md). This tool is the one-way proje
     content/courses/<id>/                academy/courses/<slug>/
       manifest.json          ──────▶       course.yaml
       lessons/drafts/*.md                   lessons/<slug>/lesson.yaml   (blocks: prose + quiz + code)
-      (brief.quiz_blocks)                   lessons/<slug>/intro.md      (visuals → ![alt](assets/vNN-*.png))
+      (brief.quiz_blocks)                   lessons/<slug>/intro.md      (visuals → ![alt](assets/vNN-*.webp))
       (brief.coding_challenges)             lessons/<slug>/<challenge>/{starter,solution}.{rs,ts},tests.json
-      lessons/assets/<stem>/vNN-*.png       lessons/<slug>/assets/vNN-*.png
+      lessons/assets/<stem>/vNN-*.{webp,png} lessons/<slug>/assets/vNN-*  (webp wins over its PNG sibling)
       lessons/assets/<stem>/vNN-*.html      visual-src/<slug>/vNN-*.html  (+ shared _brand/_render.css)
       branding/banner.webp                  assets/banner.webp + `thumbnail:` in course.yaml
       branding/banner.html (+logo, bg)      visual-src/  (re-renderable banner source)
@@ -58,27 +58,64 @@ def _draft_stem(mod_idx: int, order, lid: str) -> str:
     return f"m{mod_idx:02d}-l{order}-{_safe(lid)}"
 
 
-def _asset_pngs(asset_dir: Path) -> dict[int, str]:
-    """Map visual ordinal → rendered PNG filename in a lesson's asset dir
-    (render_visuals.py names them v<NN>-<type>.png, NN = Nth ```visual spec)."""
+def _asset_visuals(asset_dir: Path) -> dict[int, str]:
+    """Map visual ordinal → the filename that SHIPS for it from a lesson's asset dir
+    (render_visuals.py names them v<NN>-<type>.png, NN = Nth ```visual spec). A same-stem
+    `.webp` sibling is the compressed publish form and supersedes the PNG: upstream ships
+    webp, and the PNG stays on disk here only as the render intermediate."""
     out: dict[int, str] = {}
     if asset_dir.is_dir():
-        for p in sorted(asset_dir.glob("v*.png")):
+        for p in sorted(asset_dir.glob("v*.png")) + sorted(asset_dir.glob("v*.webp")):
             mt = re.match(r"v(\d+)-", p.name)
-            if mt:
+            if mt and (p.suffix == ".webp" or int(mt.group(1)) not in out):
                 out[int(mt.group(1))] = p.name
     return out
 
 
-def _prose_from_draft(md: str, pngs: dict[int, str] | None = None,
+def _strip_html_comments(md: str) -> str:
+    """Drop `<!-- ... -->` spans from prose so source-side harness annotations (the
+    `verify: expect-fail` markers the code oracle reads) never reach a learner. Fenced
+    code is passed through untouched: a fence may legitimately contain `<!--` as the
+    very thing it is teaching. Comment-only lines are removed rather than left blank."""
+    out, in_fence, in_comment = [], False, False
+    for raw in md.split("\n"):
+        ln = raw
+        if in_comment:
+            idx = ln.find("-->")
+            if idx == -1:
+                continue
+            ln, in_comment = ln[idx + 3:], False
+            if not ln.strip():
+                continue
+        if in_fence:
+            if ln.lstrip().startswith("```"):
+                in_fence = False
+            out.append(ln)
+            continue
+        if ln.lstrip().startswith("```"):
+            in_fence = True
+            out.append(ln)
+            continue
+        stripped = re.sub(r"<!--.*?-->", "", ln, flags=re.S)
+        idx = stripped.find("<!--")
+        if idx != -1:
+            in_comment = True
+            stripped = stripped[:idx]
+        if stripped != ln and not stripped.strip():
+            continue
+        out.append(stripped)
+    return "\n".join(out)
+
+
+def _prose_from_draft(md: str, imgs: dict[int, str] | None = None,
                       warnings: list[str] | None = None, where: str = "") -> str:
     """Project a written draft into an Academy prose `.md`. Lossless of prose; the Nth
-    ```visual spec becomes a markdown image embed of its rendered PNG
-    (`![alt](assets/vNN-<type>.png)`, the Academy convention — courses/README.md there).
-    A spec with no rendered PNG degrades to a blockquote carrying its title + alt, so no
+    ```visual spec becomes a markdown image embed of its rendered visual
+    (`![alt](assets/vNN-<type>.webp)`, the Academy convention — courses/README.md there).
+    A spec with no rendered image degrades to a blockquote carrying its title + alt, so no
     learner-facing meaning is lost and no orphan image reference is created."""
-    pngs = pngs or {}
-    out, i, n, lines = [], 0, 0, md.split("\n")
+    imgs = imgs or {}
+    out, i, n, lines = [], 0, 0, _strip_html_comments(md).split("\n")
     while i < len(lines):
         s = lines[i].strip()
         if s == "```visual":
@@ -93,12 +130,12 @@ def _prose_from_draft(md: str, pngs: dict[int, str] | None = None,
                     spec[mt.group(1)] = mt.group(2).strip()
             title = spec.get("title", spec.get("type", "diagram"))
             alt = spec.get("alt", "").strip()
-            png = pngs.get(n)
-            if png:
-                out.append(f"![{alt or title}](assets/{png})")
+            img = imgs.get(n)
+            if img:
+                out.append(f"![{alt or title}](assets/{img})")
             else:
                 if warnings is not None:
-                    warnings.append(f"{where}: visual {n} ('{title}') has no rendered PNG — "
+                    warnings.append(f"{where}: visual {n} ('{title}') has no rendered image — "
                                     f"blockquote placeholder emitted (run render_visuals.py first)")
                 out.append(f"> **Visual — {title}.**" + (f" {alt}" if alt else ""))
             i = j + 1
@@ -251,14 +288,14 @@ def plan_academy(course_dir: Path, cfg: dict, m: dict,
         stem = _draft_stem(mod_idx.get(l.get("module"), 99), l.get("order", 0), lid)
         draft = course_dir / "lessons" / "drafts" / f"{stem}.md"
         asset_dir = course_dir / "lessons" / "assets" / stem
-        pngs = _asset_pngs(asset_dir)
+        imgs = _asset_visuals(asset_dir)
         if draft.is_file():
             text = draft.read_text("utf-8")
             n_specs = sum(1 for ln in text.split("\n") if ln.strip() == "```visual")
-            if pngs and len(pngs) != n_specs:
-                warnings.append(f"{lid}: {n_specs} visual spec(s) but {len(pngs)} rendered "
-                                f"PNG(s) in assets/{stem}/ — spec↔render join is positional, re-render")
-            files[f"{ldir}/intro.md"] = _prose_from_draft(text, pngs, warnings, lid)
+            if imgs and len(imgs) != n_specs:
+                warnings.append(f"{lid}: {n_specs} visual spec(s) but {len(imgs)} rendered "
+                                f"visual(s) in assets/{stem}/ — spec↔render join is positional, re-render")
+            files[f"{ldir}/intro.md"] = _prose_from_draft(text, imgs, warnings, lid)
         else:
             warnings.append(f"no draft for {lid} ({stem}.md) — emitting placeholder prose")
             files[f"{ldir}/intro.md"] = f"# {brief.get('title', lid)}\n\n_(draft pending)_\n"
@@ -266,8 +303,14 @@ def plan_academy(course_dir: Path, cfg: dict, m: dict,
         # visuals plus any hand-placed image a draft references as ![alt](assets/<name>).
         # HTML sources stay re-renderable under course-level visual-src/ (linter-ignored
         # upstream, never published). PDFs are render intermediates and never ship.
+        # A rendered vNN PNG superseded by its .webp sibling stays behind: `imgs` already
+        # points the markdown ref at the webp, so shipping the PNG too would be an orphan.
+        superseded = {Path(n).with_suffix(".png").name
+                      for n in imgs.values() if n.endswith(".webp")}
         if asset_dir.is_dir():
             for img in sorted(asset_dir.iterdir()):
+                if img.name in superseded:
+                    continue
                 if img.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
                     copies.append((str(img.resolve()), f"{ldir}/assets/{img.name}"))
             for html in sorted(asset_dir.glob("v*.html")):
@@ -320,9 +363,10 @@ def plan_academy(course_dir: Path, cfg: dict, m: dict,
 
         lesson_doc = {"id": _lesson_id(cfg["prefix"], lid), "slug": slug,
                       "title": brief.get("title", lid)}
-        sk = _skills_for(brief, mod, cfg)
-        if sk:
-            lesson_doc["skills"] = sk
+        # content-lint gate-1 (the app's Zod, stricter than the repo's lesson.schema.json)
+        # requires `skills` to be an ARRAY on every lesson — an omitted key fails the lesson
+        # and cascades into gate-4 "missing lesson" errors. Always emit, empty when unmapped.
+        lesson_doc["skills"] = _skills_for(brief, mod, cfg)
         lesson_doc["blocks"] = blocks
         files[f"{ldir}/lesson.yaml"] = to_yaml(lesson_doc)
 
@@ -361,7 +405,8 @@ def emit(course_dir: str, out_dir: str, opts: dict, force: bool) -> int:
     for w in warnings:
         print(f"  warn: {w}", file=sys.stderr)
     n_refs = sum(f.count("](assets/") for rel, f in files.items() if rel.endswith("intro.md"))
-    n_pngs = sum(1 for _, rel in copies if "/assets/" in rel and rel.endswith(".png"))
+    n_pngs = sum(1 for _, rel in copies if "/assets/" in rel
+                 and rel.endswith((".png", ".webp", ".jpg", ".jpeg", ".gif")))
     print(f"academy emit: {written} files → {out}/  (course {cfg['course_id']}, {len(files)} generated, "
           f"{len(copies)} copied, images {n_refs} referenced/{n_pngs} copied, {len(warnings)} warning(s))")
     if cfg["creator"] == "REPLACE_WITH_YOUR_SOLANA_WALLET":
@@ -376,7 +421,8 @@ def check(course_dir: str, opts: dict) -> int:
     cfg = _academy_cfg(m, opts)
     files, warnings, copies = plan_academy(course_dir, cfg, m)
     n_refs = sum(f.count("](assets/") for rel, f in files.items() if rel.endswith("intro.md"))
-    n_pngs = sum(1 for _, rel in copies if "/assets/" in rel and rel.endswith(".png"))
+    n_pngs = sum(1 for _, rel in copies if "/assets/" in rel
+                 and rel.endswith((".png", ".webp", ".jpg", ".jpeg", ".gif")))
     print(f"academy check: course '{cfg['course_id']}' → would write {len(files)} files "
           f"+ copy {len(copies)} file(s); images: {n_refs} referenced / {n_pngs} copied"
           + ("" if n_refs == n_pngs else "  ← MISMATCH"))
@@ -406,10 +452,26 @@ def selftest() -> int:
     chk("![a full sentence describing the flow](assets/v01-diagram.png)" in proj
         and "```visual" not in proj and "> **Visual" not in proj,
         "rendered visual -> markdown image with alt")
+    proj = _prose_from_draft(src, {1: "v01-diagram.webp"})
+    chk("(assets/v01-diagram.webp)" in proj, "webp sibling is what the markdown ref points at")
     warns: list[str] = []
     proj = _prose_from_draft(src, {}, warns, "l1")
     chk("> **Visual — the flow.**" in proj and "a full sentence" in proj and len(warns) == 1,
         "unrendered visual -> blockquote fallback + warning")
+
+    # html comments: harness annotations stripped from prose, kept inside fenced code
+    csrc = ("# T\n\nkeep me\n\n<!-- verify: expect-fail -->\n```ts\n"
+            "const tpl = `<!-- not a real comment -->`;\n```\n\n"
+            "trailing <!-- inline note --> text\n\n"
+            "<!-- a multi-line\nannotation that spans\nthree lines -->\n\nlast line\n")
+    cproj = _prose_from_draft(csrc)
+    chk("verify: expect-fail" not in cproj, "prose html comment stripped")
+    chk("<!-- not a real comment -->" in cproj, "in-fence '<!--' literal survives")
+    chk("trailing  text" in cproj and "inline note" not in cproj,
+        "inline comment removed, surrounding prose kept")
+    chk("annotation that spans" not in cproj and "last line" in cproj,
+        "multi-line comment consumed without eating following prose")
+    chk("\n\n\n\n" not in cproj, "comment-only lines dropped, not left as blank runs")
 
     # duration default: derived from length_target.hours (HOURS upstream, never lesson count)
     one_lesson = [{"id": "l1", "module": "m", "order": 1, "brief": {}}]
@@ -433,8 +495,9 @@ def selftest() -> int:
         "course": {"id": "demo-course", "title": "Demo", "one_line_promise": "Do X.",
                    "length_target": {"hours": 6}},
         "academy": {"prefix": "dm", "creator": "Wa11etDemo1111111111111111111111111111111",
-                    "skills_map": {"account-model": "account-model"}, "default_skills": ["rust"]},
-        "modules": [{"id": "module-intro", "title": "Intro", "teaches_skills": ["account-model"]}],
+                    "skills_map": {"account-model": "account-model"}, "default_skills": []},
+        "modules": [{"id": "module-intro", "title": "Intro", "teaches_skills": ["account-model"]},
+                    {"id": "module-extra", "title": "Extra", "teaches_skills": ["unmapped-node"]}],
         "lessons": [{"id": "the-basics", "module": "module-intro", "order": 1, "brief": {
             "title": "The Basics",
             "coding_challenges": [{"id": "add-two", "language": "rust", "buildType": "standard",
@@ -444,7 +507,9 @@ def selftest() -> int:
                 {"id": "q1", "prompt": "unit?", "options": [
                     {"id": "a", "label": "gwei", "correct": False, "feedback": "no"},
                     {"id": "b", "label": "lamport", "correct": True}],
-                 "explanation": "1e9"}]}]}}],
+                 "explanation": "1e9"}]}]}},
+                    {"id": "loose-ends", "module": "module-extra", "order": 1,
+                     "brief": {"title": "Loose Ends"}}],
     }
     with tempfile.TemporaryDirectory() as td:
         cdir = Path(td) / "course"
@@ -452,10 +517,13 @@ def selftest() -> int:
         (cdir / "lessons" / "drafts" / "m00-l1-the-basics.md").write_text(
             "# The Basics\n\nbody words here\n\n```visual\ntype: diagram\ntitle: the flow\n"
             "alt: the whole flow at a glance\n```\n\n```visual\ntype: table\ntitle: unrendered\n"
-            "```\n\nmore words\n", "utf-8")
+            "```\n\n```visual\ntype: table\ntitle: the sizes\nalt: sizes side by side\n```\n"
+            "\nmore words\n", "utf-8")
         adir = cdir / "lessons" / "assets" / "m00-l1-the-basics"
         adir.mkdir(parents=True)
         (adir / "v01-diagram.png").write_bytes(b"\x89PNG fake")
+        (adir / "v01-diagram.webp").write_bytes(b"RIFF fake webp")   # supersedes the PNG
+        (adir / "v03-table.png").write_bytes(b"\x89PNG no webp sibling")
         (adir / "v01-diagram.html").write_text("<html>viz</html>", "utf-8")
         (adir / "fonte-externa.png").write_bytes(b"\x89PNG photo")
         (adir / "v01-diagram.pdf").write_bytes(b"%PDF intermediate")
@@ -483,6 +551,9 @@ def selftest() -> int:
         chk("id: lesson-dm-the-basics" in ly, "lesson id")
         chk("type: prose" in ly and "type: code" in ly and "type: quiz" in ly, "three block types")
         chk("account-model" in ly, "skills mapped from dag node")
+        ly2 = (out / "lessons" / "loose-ends" / "lesson.yaml").read_text()
+        chk("skills: []" in ly2, "unmapped lesson still emits skills as an EMPTY ARRAY "
+            "(content-lint gate-1 rejects an omitted key)")
         chk("starter: add-two/starter.rs" in ly, "code block references copied starter")
         chk((out / "lessons" / "the-basics" / "add-two" / "starter.rs").is_file()
             and (out / "lessons" / "the-basics" / "add-two" / "solution.rs").is_file()
@@ -490,11 +561,15 @@ def selftest() -> int:
             "challenge source files copied")
         intro = (out / "lessons" / "the-basics" / "intro.md").read_text()
         chk(intro.startswith("# The Basics"), "intro.md carries the draft prose")
-        chk("![the whole flow at a glance](assets/v01-diagram.png)" in intro,
-            "rendered visual embedded as image in intro.md")
+        chk("![the whole flow at a glance](assets/v01-diagram.webp)" in intro,
+            "rendered visual embedded as image in intro.md, webp preferred over its PNG")
         chk("> **Visual — unrendered.**" in intro, "unrendered visual falls back to blockquote")
-        chk((out / "lessons" / "the-basics" / "assets" / "v01-diagram.png").is_file(),
-            "rendered PNG copied beside the lesson")
+        chk("![sizes side by side](assets/v03-table.png)" in intro,
+            "a visual with no webp sibling still references its PNG")
+        lassets = out / "lessons" / "the-basics" / "assets"
+        chk((lassets / "v01-diagram.webp").is_file() and not (lassets / "v01-diagram.png").exists(),
+            "webp shipped, the PNG it supersedes left behind (no orphan)")
+        chk((lassets / "v03-table.png").is_file(), "png-only visual copied beside the lesson")
         chk((out / "lessons" / "the-basics" / "assets" / "fonte-externa.png").is_file()
             and not (out / "lessons" / "the-basics" / "assets" / "v01-diagram.pdf").exists(),
             "hand-placed image copied; PDF intermediate not shipped")
