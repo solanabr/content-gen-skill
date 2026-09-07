@@ -13,6 +13,8 @@ pass in references/quality-bar.md.
   ladder    artifact-rung monotonicity, difficulty band, cadence coverage
   capstone  capstone requires only skills taught earlier
   outcomes  every terminal outcome has a proof and vice-versa; module traces resolve
+  freshness per-claim expiry: verified_on present, nothing past its TTL, volatile kinds
+            carry a runnable `recheck` probe (see method/fact-recheck.md)
   continuity  the reader's tree: nothing opened before it exists, no symbol that
               changes shape mid-course, no old name surviving a declared rename
   all       run everything; exit 1 if any HARD fired
@@ -37,6 +39,9 @@ from course_lib import (
     WEAK_BLOOM_VERBS, PASSIVE_ASSESSMENT_RE, CHALLENGE_LANGS, CHALLENGE_BUILD_TYPES,
     SYMBOL_KINDS, SYMBOL_RE, LEDGER_LEGACY_KEYS,
     load_manifest, flatten_lessons, topo_sort, course_ledgers,
+    CLAIM_KINDS, RECHECK_REQUIRED_KINDS, RECHECK_ADVISORY_KINDS, TTL_DAYS,
+    claim_freshness, claim_ttl, course_ttl_policy, parse_iso_date, today,
+    undated_deadline, FRESHNESS_EPOCH,
 )
 
 HARD = "[HARD] "
@@ -785,6 +790,105 @@ def check_research(m: dict) -> dict:
     return _result("research", flags)
 
 
+def check_freshness(m: dict, as_of=None) -> dict:
+    """Per-claim expiry: the publish-time gate on facts that were true when written.
+
+    `check_research` proves a claim was grounded ONCE. Nothing proved it was still true
+    the day it shipped, and an audit of five generated courses found six defects that were
+    all that same hole: rent constants matching no live cluster, a rent mechanism the
+    runtime now rejects, a dead API taught as live, an archived repo called "the living
+    reference". Every one was verified once and then trusted forever.
+
+    HARD
+      - status verified with no obtainable date  (after the backfill window closes)
+      - any live claim past its TTL              ← forces a re-probe, not a silent re-ship
+      - onchain-number / cli-default / protocol-param / version-pin with no `recheck`,
+        because an un-runnable probe is not a probe
+      - a per-claim `ttl_days` that LENGTHENS its kind default, or an unknown `kind`
+    ADVISORY
+      - past 0.75x TTL (schedule the re-probe before it ambushes a publish)
+      - no `kind` (the claim inherits the volatile 30-day default)
+      - an api/number claim citing a URL with no `recheck` (a cited URL is a free probe,
+        and defect #4 was a cited URL that stopped resolving)
+      - a research scaffold with frozen_facts and zero claims — the gate is SILENT there
+        because nothing is declared, not because the facts are fresh. Eight of the ten
+        courses in the corpus are in exactly that state.
+
+    Dates and TTLs come from course_lib so this and `fact_freshness.py stale` and
+    `academy_export.py` can never disagree about what "stale" means.
+    """
+    flags: list[str] = []
+    as_of = as_of or today()
+    deadline = undated_deadline()
+    backfill_open = as_of < deadline
+    pol = course_ttl_policy(m)
+    if pol["declared"] and pol["days"] and pol["days"] > TTL_DAYS["onchain-number"]:
+        flags.append(f"{ADV}cadence.release.freshness_policy asks for "
+                     f"{pol['declared']}d on on-chain numbers but the kind default is "
+                     f"{TTL_DAYS['onchain-number']}d — a policy may only shorten, so the "
+                     f"default applies (course_lib.TTL_DAYS)")
+    n_claims = 0
+    for l in m.get("lessons", []) or []:
+        lid = l.get("id", "?")
+        r = l.get("research") or {}
+        claims = [c for c in (r.get("claims") or []) if isinstance(c, dict)]
+        if r and not claims and r.get("frozen_facts"):
+            flags.append(f"{ADV}lesson {lid}: research scaffold declares "
+                         f"{len(r['frozen_facts'])} frozen_fact(s) and ZERO claims — nothing "
+                         f"here is on any expiry clock; promote the volatile ones to claims[]")
+        for c in claims:
+            n_claims += 1
+            cid = c.get("id", "?")
+            f = claim_freshness(c, as_of, policy=pol, lesson_id=lid)
+            where = f"lesson {lid} claim {cid}"
+
+            kind = c.get("kind")
+            if kind is None:
+                flags.append(f"{ADV}{where}: no kind — it inherits the volatile "
+                             f"{f['ttl']}-day default; declare one of {sorted(CLAIM_KINDS)}")
+            elif kind not in CLAIM_KINDS:
+                flags.append(f"{HARD}{where}: unknown kind '{kind}' — the vocabulary is "
+                             f"closed ({sorted(CLAIM_KINDS)})")
+
+            own = c.get("ttl_days")
+            if isinstance(own, int) and own > f["kind_ttl"]:
+                flags.append(f"{HARD}{where}: ttl_days={own} lengthens the {kind} default of "
+                             f"{f['kind_ttl']}d — a claim may only SHORTEN its kind's TTL")
+
+            if f["provenance"] == "malformed":
+                flags.append(f"{HARD}{where}: verified_on={c.get('verified_on')!r} is not an "
+                             f"ISO YYYY-MM-DD date")
+            elif f["live"] and f["undated"]:
+                msg = (f"{where}: status={f['status']} with no verified_on and no dispatch date "
+                       f"in evidence — 'verified' with no date is a mood, not a measurement")
+                flags.append((f"{ADV}{msg}; backfill or re-probe before {deadline.isoformat()}"
+                              if backfill_open else f"{HARD}{msg}"))
+
+            if f["live"] and f["state"] == "stale":
+                flags.append(f"{HARD}{where}: last verified {f['verified_on'] or 'never'} — "
+                             f"{f['age_days']}d old against a {f['ttl']}d TTL for kind "
+                             f"'{kind or 'unset'}'. Re-probe (fact_freshness.py probes) and "
+                             f"update verified_on; do not re-ship it unread")
+            elif f["live"] and f["state"] == "aging":
+                flags.append(f"{ADV}{where}: {f['age_days']}d of a {f['ttl']}d TTL used — "
+                             f"expires {f['days_left']}d from now; schedule the re-probe")
+
+            if not f["recheck"]:
+                if kind in RECHECK_REQUIRED_KINDS:
+                    flags.append(f"{HARD}{where}: kind '{kind}' with no `recheck` — this value "
+                                 f"is read off a machine, so record the exact re-runnable probe "
+                                 f"(an RPC call, a curl, a --version), not prose")
+                elif kind in RECHECK_ADVISORY_KINDS and f["urls"]:
+                    flags.append(f"{ADV}{where}: cites {f['urls'][0]} and carries no `recheck` — "
+                                 f"a cited URL is a free probe, and a cited URL that stopped "
+                                 f"resolving is exactly how a dead API shipped as live")
+
+    if not flags:
+        return _result("freshness", [f"ok: {n_claims} claim(s), none past TTL as of "
+                                     f"{as_of.isoformat()}"])
+    return _result("freshness", flags)
+
+
 def check_artifacts(m: dict) -> dict:
     """The accretion graph: 'the toolkit becomes the bot' as a checkable DAG.
 
@@ -1085,8 +1189,9 @@ def check_challenges(course_dir, m: dict | None = None) -> dict:
 
 CHECKS = {"dag": check_dag, "briefs": check_briefs, "quiz": check_quiz, "ladder": check_ladder,
           "capstone": check_capstone, "outcomes": check_outcomes,
-          "research": check_research, "artifacts": check_artifacts,
-          "continuity": check_continuity, "length": check_length}
+          "research": check_research, "freshness": check_freshness,
+          "artifacts": check_artifacts, "continuity": check_continuity,
+          "length": check_length}
 
 
 # ── runner ──────────────────────────────────────────────────────────────────────
@@ -1300,6 +1405,89 @@ def selftest() -> int:
     check(check_research(rg)["hard"], "verified claim via non-kit surface -> research HARD")
     rg["lessons"][0]["research"]["claims"][0]["mcp"] = "solana-researcher"
     check(not check_research(rg)["hard"], "kit surface -> research clean")
+
+    # freshness: per-claim expiry (the anti-staleness gate)
+    import datetime as _fdt
+    NOW = _fdt.date(2026, 9, 20)          # inside the backfill window (epoch + 13d)
+    LATER = _fdt.date(2026, 11, 1)        # past it (epoch + 55d)
+
+    def _fresh(claim, when=NOW, extra=None):
+        fm = _good_manifest()
+        for _l in fm["lessons"]:
+            _l["research"] = {"claims": []}
+        fm["lessons"][0]["research"] = {"claims": [claim]}
+        if extra:
+            fm.update(extra)
+        return check_freshness(fm, when)
+
+    good = {"id": "C1", "kind": "onchain-number", "status": "verified",
+            "verified_on": "2026-09-18", "mcp": "helius",
+            "recheck": "rpc getMinimumBalanceForRentExemption 165"}
+    check(not _fresh(good)["hard"], "dated, in-TTL, probeable claim -> freshness clean")
+
+    stale_c = dict(good, verified_on="2026-08-01")
+    r = _fresh(stale_c)
+    check(r["hard"] and any("50d old against a 14d TTL" in f for f in r["flags"]),
+          "a claim past its TTL -> freshness HARD (the publish gate)")
+
+    aging_c = dict(good, verified_on="2026-09-08")
+    r = _fresh(aging_c)
+    check(not r["hard"] and any("TTL used" in f for f in r["flags"]),
+          "past 0.75x TTL -> advisory, not hard")
+
+    no_probe = {k: v for k, v in good.items() if k != "recheck"}
+    r = _fresh(no_probe)
+    check(r["hard"] and any("no `recheck`" in f for f in r["flags"]),
+          "an on-chain number with no runnable probe -> freshness HARD")
+    for _k in ("cli-default", "protocol-param", "version-pin"):
+        check(_fresh(dict(no_probe, kind=_k))["hard"],
+              f"kind '{_k}' with no recheck -> freshness HARD")
+
+    undated = {k: v for k, v in good.items() if k != "verified_on"}
+    r_in = _fresh(undated)
+    check(not r_in["hard"] and any("no verified_on" in f for f in r_in["flags"]),
+          "verified with no date, inside the backfill window -> advisory")
+    r_out = _fresh(undated, LATER)
+    check(r_out["hard"], "verified with no date, past the backfill window -> HARD")
+
+    inferred = dict(undated, evidence="https://x/y (dispatched 2026-09-18)")
+    check(not _fresh(inferred)["hard"] and
+          not any("no verified_on" in f for f in _fresh(inferred)["flags"]),
+          "a dispatch date in evidence satisfies the date requirement")
+
+    check(_fresh(dict(good, verified_on="09/18/2026"))["hard"],
+          "a non-ISO verified_on -> freshness HARD")
+    check(_fresh(dict(good, kind="on-chain-number"))["hard"],
+          "an unknown kind -> freshness HARD (closed vocabulary)")
+    check(_fresh(dict(good, ttl_days=365))["hard"],
+          "a per-claim ttl_days that lengthens the kind default -> freshness HARD")
+    check(not _fresh(dict(good, ttl_days=7))["hard"],
+          "a per-claim ttl_days that shortens is fine")
+
+    url_api = {"id": "C1", "kind": "api", "status": "verified", "verified_on": "2026-09-18",
+               "mcp": "solana-dev", "evidence": "https://station.jup.ag/docs/apis/swap-api"}
+    r = _fresh(url_api)
+    check(not r["hard"] and any("free probe" in f for f in r["flags"]),
+          "an api claim citing a URL with no recheck -> advisory (defect #4's shape)")
+
+    check(any("ZERO claims" in f for f in _fresh(
+        good, NOW, {"lessons": [{"id": "x", "module": "m-accounts", "order": 1, "brief": {},
+                                 "research": {"frozen_facts": ["890,880"]}}]})["flags"]),
+        "frozen_facts with no claims -> advisory that the gate is silent, not that it passed")
+
+    lax = {"cadence": {"release": {"schedule": [{"week": 1, "publish": ["the-counter"]}],
+                                   "freshness_policy": {
+                                       "onchain_numbers_restale_after_days": 90}}}}
+    check(any("may only shorten" in f for f in _fresh(good, NOW, lax)["flags"]),
+          "a freshness_policy longer than the kind default -> advisory that it is ignored")
+    tight = {"cadence": {"release": {"schedule": [{"week": 1, "publish": ["the-counter"]}],
+                                     "freshness_policy": {
+                                         "onchain_numbers_restale_after_days": 1}}}}
+    check(_fresh(good, NOW, tight)["hard"],
+          "a freshness_policy shorter than the kind default DOES tighten the gate")
+
+    check("freshness" in CHECKS and CHECKS["freshness"] is check_freshness,
+          "freshness is registered in CHECKS")
 
     # artifacts: forward consumption
     ag = _good_manifest()

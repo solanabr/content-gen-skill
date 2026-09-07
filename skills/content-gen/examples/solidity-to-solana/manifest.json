@@ -674,7 +674,7 @@
         }
       ],
       "freshness_policy": {
-        "onchain_numbers_restale_after_days": 30,
+        "onchain_numbers_restale_after_days": 14,
         "applies_to": [
           "state-lives-in-accounts",
           "token-deposit-cpi"

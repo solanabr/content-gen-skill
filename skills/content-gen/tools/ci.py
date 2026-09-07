@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import datetime as _dt
 import shlex
 import shutil
 import subprocess
@@ -203,6 +204,12 @@ def t2_fixtures() -> bool:
             "provides": ["fn:initialize"], "consumes": ["fn:init_vault"],
             "renames": [{"from": "fn:init_vault", "to": "fn:initialize",
                          "since_lesson": "pda-state"}]}
+    def mut_stale(m): m["lessons"][0]["research"] = {"claims": [
+        {"id": "C1", "kind": "onchain-number", "status": "verified", "verified_on": "2020-01-01",
+         "mcp": "helius", "recheck": "rpc getMinimumBalanceForRentExemption 165"}]}
+    def mut_unprobeable(m): m["lessons"][0]["research"] = {"claims": [
+        {"id": "C1", "kind": "onchain-number", "status": "verified", "mcp": "helius",
+         "verified_on": _dt.date.today().isoformat()}]}
 
     fixtures = [
         ("non-kebab id", mut_id, vc.check_dag, "not kebab-case"),
@@ -215,6 +222,8 @@ def t2_fixtures() -> bool:
         ("consumes an unbuilt symbol", mut_consumes, vc.check_continuity, "no lesson provides"),
         ("undeclared signature drift", mut_sigdrift, vc.check_continuity, "different signatures"),
         ("old name after a rename", mut_stale_rename, vc.check_continuity, "still uses"),
+        ("expired claim", mut_stale, vc.check_freshness, "TTL"),
+        ("volatile claim with no recheck probe", mut_unprobeable, vc.check_freshness, "recheck"),
     ]
     ok = True
     for name, mut, check, needle in fixtures:

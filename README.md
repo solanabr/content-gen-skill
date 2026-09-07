@@ -159,6 +159,8 @@ there. A lesson brief may carry:
 ```bash
 # validate the specs + that every challenge's starter/solution/tests file exists
 python3 skills/content-gen/tools/validate_course.py challenges --course content/courses/<id>
+# BLOCKING: no research claim past its TTL (exit 1 if any) — see method/fact-recheck.md
+python3 skills/content-gen/tools/fact_freshness.py stale --course content/courses/<id>
 # project the course into the Academy publish tree (course.yaml + per-lesson lesson.yaml blocks + files)
 python3 skills/content-gen/tools/academy_export.py emit --course content/courses/<id> --out content/academy/courses/<slug>
 # PROVE the contract in a real toolchain (tsc+node for TS; cargo check vs anchor-lang for buildable Rust)

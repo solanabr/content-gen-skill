@@ -69,7 +69,8 @@ Stdlib only. No third-party imports, no network at import time. Every tool expos
 | `verify_code.py` | compile/run every fenced block. Python, JSON, TOML, Solidity, and the three-tier bash checker |
 | `verify_blocks.py` | compile rust/typescript blocks against the course's DECLARED deps, triaging fragment context from real defects |
 | `verify_challenges.py` | THE platform contract: solution passes every test, starter fails at least one |
-| `academy_export.py` | project a course into the Academy publish tree (`content/academy/`), read-only on the source |
+| `fact_freshness.py` | per-claim expiry (`report · stale · probes`). `stale` is the blocking publish gate; TTLs live per `kind` in `course_lib.TTL_DAYS` |
+| `academy_export.py` | project a course into the Academy publish tree (`content/academy/`), read-only on the source. Refuses a past-TTL claim unless `--allow-stale` |
 | `render_visuals.py` | render visual specs and the course banner |
 | `quiz_*.py` | quiz authoring, layout and metrics |
 | `dedash.py` | remove em-dashes from every reader-visible surface, repairing by syntactic role |

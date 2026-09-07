@@ -18,6 +18,7 @@ PARSE YAML — only emit it — so there is no fragile regex YAML reader to rot.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import json
 import re
@@ -129,6 +130,246 @@ KIT_SURFACES = {"solana-dev", "context7", "helius", "surfpool", "deep-research",
 # Visual placeholder contract (references/visual-placeholders.md).
 VISUAL_TYPES = {"flowchart", "diagram", "chart", "table", "comparison", "annotated-code", "timeline"}
 VISUAL_FIELDS = ("type", "title", "purpose", "data", "prompt", "alt")
+
+
+# ── fact freshness: per-claim expiry ────────────────────────────────────────────
+#
+# WHY. An audit of five generated courses found six shipped defects that were all the
+# same defect: a fact that was TRUE WHEN WRITTEN and expired quietly. A rent mechanism
+# the runtime now rejects up front; rent constants (890,880 / 2,282,880) matching no
+# live cluster (mainnet returns 810,624 / 2,077,224, devnet 650,240 / 1,666,240); a
+# protocol feature taught backwards; a dead API (`quote-api.jup.ag`) taught as live; an
+# archived repo called "the living reference"; and one hardcoded ATA rent figure in ~10
+# sites including a graded quiz key. Nothing re-verified a claim at publish time and no
+# claim carried an expiry, so each one shipped, read fine, and was wrong.
+#
+# The three fields that fix it live on `lesson.research.claims[]`:
+#   verified_on  ISO date — REQUIRED when status is verified. Without it "verified" is
+#                a mood, not a measurement.
+#   ttl_days     defaulted PER KIND from TTL_DAYS below, never per claim. A per-claim
+#                value may only SHORTEN the kind default; lengthening it is exactly how
+#                a stale fact gets smuggled past the gate, so it is a HARD failure.
+#   recheck      the exact re-runnable probe (an RPC call, a curl, a `--version`), not
+#                prose. This is the field that makes re-verification cheap enough to
+#                actually happen; an un-runnable probe is not a probe.
+#
+# Changing a number here reaches every course, which is the point of declaring it once.
+
+CLAIM_KINDS = {
+    "concept",          # durable model / history: "DigiCash filed Chapter 11 in 1998"
+    "number",           # a bare figure with no cluster behind it (legacy, generic)
+    "api",              # a call, endpoint, or signature a lesson depends on
+    "code",             # a snippet the lesson ships (also gated by verify_code/verify_blocks)
+    "onchain-number",   # rent, account sizes, fees — read off a live cluster
+    "cli-default",      # what a command does with no flags (`solana config get`, scaffolds)
+    "version-pin",      # a pinned crate/npm/toolchain version an example builds against
+    "protocol-param",   # slot time, epoch length, a feature-gate's activation state
+}
+
+# TTL per kind, in days. See method/fact-recheck.md for the evidence behind each number.
+TTL_DAYS = {
+    "onchain-number": 14,   # rent/fee figures move with the rent rate; the audit's worst class
+    "number": 30,
+    "cli-default": 30,      # tracks the Agave/Anchor release train, ~monthly
+    "version-pin": 30,      # same train; aligns with references/pins.yaml's own TTL discipline
+    "protocol-param": 30,   # ~10 epochs: long enough to not re-probe weekly, short enough to
+                            # catch a cluster-wide feature-gate activation
+    "api": 60,              # NOT 90 — a 90-day window still called `quote-api.jup.ag` fresh
+    "code": 90,             # re-compiled every run by verify_blocks; TTL is the backstop
+    "concept": 365,         # a liveness check on the lesson, not on the fact
+}
+# A claim with no `kind` is treated as volatile, never as a concept: guessing "durable"
+# on an undeclared claim is how a rent number inherits a one-year TTL.
+TTL_DEFAULT_DAYS = 30
+
+# Kinds where a claim with no runnable `recheck` is a HARD failure. Every one of these is
+# read off a machine, so "how do I re-check this" always has a one-line answer.
+RECHECK_REQUIRED_KINDS = {"onchain-number", "cli-default", "protocol-param", "version-pin"}
+# Kinds where a probe is usually possible but not always (an API *shape* claim can be a
+# doc read). Advisory only, and only when the claim cites a URL — a cited URL is a free
+# probe, and a dead cited URL is defect #4 verbatim.
+RECHECK_ADVISORY_KINDS = {"api", "number"}
+
+# Claim statuses whose facts actually ship, and therefore actually expire.
+LIVE_CLAIM_STATUSES = {"verified", "user-attested"}
+
+# Warn at three-quarters of the TTL so a re-probe can be scheduled instead of ambushing a
+# publish. Same shape as pin_refresh.py's pin TTL.
+AGING_FRACTION = 0.75
+
+# THE GRANDFATHER CLAUSE. `verified_on` shipped on this date. Claims authored before it
+# have no date and never will — 74 of the 127 claims in the ten-course corpus are in that
+# state. Two dishonest options were available: treat them as fresh (the exact failure this
+# layer exists to prevent) or treat them as infinitely old (which HARD-fails the entire
+# corpus on day one and gets the gate switched off). Neither is a gate.
+#
+# So an undated claim is dated FROM THE EPOCH — "we do not know when you checked this, so
+# the clock starts the day we started asking". The consequences fall out on their own:
+# an undated onchain-number goes HARD 14 days after the epoch, an undated concept has a
+# year, and the missing-field rule itself hardens from advisory to HARD once the backfill
+# window closes. No per-course opt-in, no flag, and it expires by itself.
+FRESHNESS_EPOCH = "2026-09-07"
+UNDATED_GRACE_DAYS = 30
+
+# A date is inferred from `evidence` only behind an explicit marker. The corpus already
+# writes `https://… (dispatched 2026-07-06)`, which is a real verification date; a bare
+# year inside a cited URL is not, and inferring from one would manufacture staleness.
+_INFER_DATE_RE = re.compile(
+    r"(?:dispatched|verified|checked|probed|retrieved|as of|accessed)\s*:?\s*(\d{4}-\d{2}-\d{2})"
+    r"|\((\d{4}-\d{2}-\d{2})\)\s*$", re.I)
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_URL_RE = re.compile(r"https?://[^\s)\"']+")
+
+
+def parse_iso_date(s) -> _dt.date | None:
+    """An ISO `YYYY-MM-DD` string as a date, or None. Never raises — a malformed date is
+    reported by the caller as a flag, not as a traceback in the middle of a gate."""
+    if isinstance(s, _dt.date):
+        return s
+    t = str(s or "").strip()
+    if not _ISO_DATE_RE.match(t):
+        return None
+    try:
+        return _dt.date.fromisoformat(t)
+    except ValueError:
+        return None
+
+
+def today() -> _dt.date:
+    return _dt.date.today()
+
+
+def resolve_verified_on(claim: dict) -> tuple[_dt.date | None, str]:
+    """(date, provenance) for when this claim was last actually checked.
+
+    provenance is one of:
+      declared  `verified_on` is present and is a real ISO date
+      inferred  mined out of `evidence` behind an explicit marker ("(dispatched 2026-07-06)")
+      malformed `verified_on` is present but is not an ISO date
+      none      no date is obtainable — the grandfather clause applies
+    """
+    raw = claim.get("verified_on")
+    if raw not in (None, ""):
+        d = parse_iso_date(raw)
+        return (d, "declared") if d else (None, "malformed")
+    m = _INFER_DATE_RE.search(str(claim.get("evidence") or ""))
+    if m:
+        d = parse_iso_date(m.group(1) or m.group(2))
+        if d:
+            return d, "inferred"
+    return None, "none"
+
+
+def course_ttl_policy(manifest: dict) -> dict:
+    """`cadence.release.freshness_policy` as a {kind: days} narrowing, plus its scope.
+
+    That block already exists in the schema (output-contract.md §Cadence) and eight of the
+    ten courses in the corpus declare it — and until now NOTHING READ IT. Wiring it here
+    turns a decorative field into the gate. It may only NARROW a kind default: a course
+    that declares 90 days for on-chain numbers is asking for a longer rope than the rent
+    figures deserve, so the default wins and check_freshness says so out loud.
+
+    Returns {"days": int|None, "applies_to": [lesson_id, ...], "declared": int|None}.
+    """
+    rel = ((manifest.get("cadence") or {}).get("release") or {})
+    pol = rel.get("freshness_policy") or {}
+    declared = pol.get("onchain_numbers_restale_after_days")
+    days = declared if isinstance(declared, int) and declared > 0 else None
+    return {"days": days, "applies_to": list(pol.get("applies_to") or []),
+            "declared": declared}
+
+
+def claim_ttl(claim: dict, policy: dict | None = None, lesson_id: str | None = None
+              ) -> tuple[int, int]:
+    """(effective_ttl_days, kind_default_days).
+
+    Both narrowing knobs are one-directional. A per-claim `ttl_days` and a course-level
+    `freshness_policy` may SHORTEN a kind default; neither may lengthen it. Lengthening is
+    how a fact that expired gets a second life without anyone re-reading it.
+    """
+    kind = claim.get("kind")
+    default = TTL_DAYS.get(kind, TTL_DEFAULT_DAYS)
+    eff = default
+    if policy and policy.get("days") and kind == "onchain-number":
+        scope = policy.get("applies_to") or []
+        if not scope or lesson_id in scope:
+            eff = min(eff, policy["days"])
+    own = claim.get("ttl_days")
+    if isinstance(own, int) and own > 0:
+        eff = min(eff, own)
+    return eff, default
+
+
+def claim_freshness(claim: dict, as_of: _dt.date | None = None,
+                    epoch: str | None = None, policy: dict | None = None,
+                    lesson_id: str | None = None) -> dict:
+    """Everything the gate and the reporter need about one claim's expiry.
+
+    Returned keys: id, kind, status, ttl, kind_ttl, verified_on (ISO or None),
+    provenance, undated, age_days, days_left, state, recheck, urls, live.
+    `state` is fresh | aging | stale, and is only meaningful when `live` is true.
+    """
+    as_of = as_of or today()
+    ep = parse_iso_date(epoch or FRESHNESS_EPOCH) or as_of
+    d, prov = resolve_verified_on(claim)
+    undated = prov in ("none", "malformed")
+    effective = d or ep
+    ttl, kind_ttl = claim_ttl(claim, policy, lesson_id)
+    age = (as_of - effective).days
+    status = str(claim.get("status") or "")
+    text = f"{claim.get('claim') or ''} {claim.get('evidence') or ''}"
+    state = "fresh"
+    if age >= ttl:
+        state = "stale"
+    elif age >= ttl * AGING_FRACTION:
+        state = "aging"
+    return {
+        "id": claim.get("id") or "?",
+        "kind": claim.get("kind"),
+        "status": status,
+        "ttl": ttl,
+        "kind_ttl": kind_ttl,
+        "verified_on": d.isoformat() if d else None,
+        "provenance": prov,
+        "undated": undated,
+        "age_days": age,
+        "days_left": ttl - age,
+        "state": state,
+        "recheck": str(claim.get("recheck") or "").strip() or None,
+        "urls": _URL_RE.findall(text),
+        "live": status in LIVE_CLAIM_STATUSES,
+        "mcp": claim.get("mcp"),
+        "claim": claim.get("claim"),
+    }
+
+
+def iter_claims(manifest: dict):
+    """(lesson_id, claim_dict) for every claim in every lesson's research scaffold."""
+    for l in manifest.get("lessons", []) or []:
+        r = l.get("research") or {}
+        for c in (r.get("claims") or []):
+            if isinstance(c, dict):
+                yield l.get("id", "?"), c
+
+
+def stale_claims(manifest: dict, as_of: _dt.date | None = None) -> list[dict]:
+    """Every live claim past its TTL, as `claim_freshness` rows with a `lesson` key.
+    This is the one function the publish gate consults, so validate_course.py and
+    academy_export.py can never disagree about what 'stale' means."""
+    pol = course_ttl_policy(manifest)
+    out = []
+    for lid, c in iter_claims(manifest):
+        f = claim_freshness(c, as_of, policy=pol, lesson_id=lid)
+        if f["live"] and f["state"] == "stale":
+            f["lesson"] = lid
+            out.append(f)
+    return out
+
+
+def undated_deadline(epoch: str = FRESHNESS_EPOCH) -> _dt.date:
+    """The day the missing-`verified_on` rule hardens from advisory to HARD."""
+    ep = parse_iso_date(epoch) or today()
+    return ep + _dt.timedelta(days=UNDATED_GRACE_DAYS)
 
 
 def _scalar(v) -> str:
@@ -561,6 +802,87 @@ def selftest() -> int:
     legacy = derive_ledger({"id": "l2", "brief": {"artifact_state_in": "x", "carry_forward": "y"}})
     check(set(legacy["legacy"]) == {"artifact_state_in", "carry_forward"},
           "derive_ledger: the never-implemented output-contract fields are reported, not ignored")
+
+    # ── fact freshness ──────────────────────────────────────────────────────────
+    D = _dt.date
+    check(set(TTL_DAYS) == CLAIM_KINDS, "every claim kind has a TTL and vice-versa")
+    check(TTL_DAYS["onchain-number"] < TTL_DAYS["api"] < TTL_DAYS["concept"],
+          "TTLs ordered by volatility")
+    check(RECHECK_REQUIRED_KINDS <= CLAIM_KINDS and not (RECHECK_REQUIRED_KINDS & RECHECK_ADVISORY_KINDS),
+          "recheck kind sets are disjoint subsets of the vocab")
+
+    # date resolution: declared / inferred / malformed / none
+    check(resolve_verified_on({"verified_on": "2026-08-01"}) == (D(2026, 8, 1), "declared"),
+          "verified_on is declared")
+    check(resolve_verified_on({"evidence": "https://x/y (dispatched 2026-07-06)"})
+          == (D(2026, 7, 6), "inferred"), "dispatch date is inferred from evidence")
+    check(resolve_verified_on({"evidence": "https://x/y verified 2026-07-06"})
+          == (D(2026, 7, 6), "inferred"), "bare marker date is inferred")
+    check(resolve_verified_on({"evidence": "https://en.wikipedia.org/wiki/Foo_2015-07-30_launch"})
+          == (None, "none"), "an unmarked date inside evidence is NOT inferred")
+    check(resolve_verified_on({"verified_on": "last tuesday"}) == (None, "malformed"),
+          "a non-ISO verified_on is malformed, not silently accepted")
+    check(resolve_verified_on({}) == (None, "none"), "no date at all")
+
+    # ttl: per-claim may shorten, never lengthen
+    check(claim_ttl({"kind": "onchain-number"}) == (14, 14), "kind default applies")
+    check(claim_ttl({"kind": "concept", "ttl_days": 30}) == (30, 365), "per-claim TTL may shorten")
+    check(claim_ttl({"kind": "onchain-number", "ttl_days": 999}) == (14, 14),
+          "per-claim TTL may NOT lengthen the kind default")
+    check(claim_ttl({}) == (TTL_DEFAULT_DAYS, TTL_DEFAULT_DAYS),
+          "a kindless claim is volatile by default, not a concept")
+
+    # course-level freshness_policy: an existing, previously-inert manifest field
+    polman = {"cadence": {"release": {"freshness_policy": {
+        "onchain_numbers_restale_after_days": 7, "applies_to": ["l9"]}}}}
+    pol = course_ttl_policy(polman)
+    check(pol["days"] == 7 and pol["applies_to"] == ["l9"], "freshness_policy is read")
+    check(claim_ttl({"kind": "onchain-number"}, pol, "l9") == (7, 14),
+          "a course policy may shorten an on-chain TTL for the lessons it scopes")
+    check(claim_ttl({"kind": "onchain-number"}, pol, "l1") == (14, 14),
+          "…and does not reach lessons outside applies_to")
+    laxpol = course_ttl_policy({"cadence": {"release": {"freshness_policy": {
+        "onchain_numbers_restale_after_days": 90}}}})
+    check(claim_ttl({"kind": "onchain-number"}, laxpol, "l1") == (14, 14),
+          "a course policy may NOT lengthen a kind default (btc-to-sol declares 90)")
+    check(course_ttl_policy({})["days"] is None, "no policy is not an error")
+
+    # state transitions around the TTL boundary
+    base = {"kind": "onchain-number", "status": "verified", "verified_on": "2026-09-01"}
+    check(claim_freshness(base, D(2026, 9, 5))["state"] == "fresh", "day 4 of 14 is fresh")
+    check(claim_freshness(base, D(2026, 9, 12))["state"] == "aging", "day 11 of 14 is aging")
+    check(claim_freshness(base, D(2026, 9, 15))["state"] == "stale", "day 14 of 14 is stale")
+    check(claim_freshness(base, D(2026, 9, 15))["days_left"] == 0, "days_left reaches 0 at expiry")
+
+    # grandfather: an undated claim is dated from the epoch, not from forever ago
+    und = {"kind": "onchain-number", "status": "verified"}
+    f = claim_freshness(und, D(2026, 9, 7))
+    check(f["undated"] and f["age_days"] == 0 and f["state"] == "fresh",
+          "an undated claim starts its clock at the epoch, not at day one of a HARD fail")
+    check(claim_freshness(und, D(2026, 9, 25))["state"] == "stale",
+          "…and still expires on its own kind's TTL")
+    check(claim_freshness({"kind": "concept", "status": "verified"}, D(2026, 12, 1))["state"] == "fresh",
+          "an undated concept keeps a year of grace")
+    check(undated_deadline() == D(2026, 10, 7), "the backfill window is one publish cycle")
+
+    # only shipping statuses expire
+    check(not claim_freshness({"kind": "api", "status": "refuted"}, D(2027, 1, 1))["live"],
+          "a refuted claim is not a shipping fact")
+    check(claim_freshness({"kind": "api", "status": "user-attested"}, D(2027, 1, 1))["live"],
+          "a user-attested claim is a shipping fact and does expire")
+
+    # urls are harvested for the advisory probe rule
+    check(claim_freshness({"kind": "api", "evidence": "see https://station.jup.ag/docs"})["urls"]
+          == ["https://station.jup.ag/docs"], "cited URL harvested")
+
+    # stale_claims / iter_claims walk the manifest shape
+    man2 = {"lessons": [{"id": "l1", "research": {"claims": [
+        {"id": "C1", "kind": "onchain-number", "status": "verified", "verified_on": "2026-01-01"},
+        {"id": "C2", "kind": "concept", "status": "verified", "verified_on": "2026-09-01"}]}}]}
+    sc = stale_claims(man2, D(2026, 9, 7))
+    check([s["id"] for s in sc] == ["C1"] and sc[0]["lesson"] == "l1",
+          "stale_claims finds the expired claim and names its lesson")
+    check(len(list(iter_claims(man2))) == 2, "iter_claims walks every lesson")
 
     print("\n" + ("COURSE_LIB SELFTESTS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1

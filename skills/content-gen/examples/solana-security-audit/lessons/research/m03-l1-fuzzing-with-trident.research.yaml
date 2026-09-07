@@ -14,6 +14,8 @@ research:
       status: verified
       evidence: "Ackee Trident docs (verified via MCP during authoring)"
       value: null
+      recheck: "context7: resolve-library-id 'trident' then query-docs 'fuzz target macro'"
+      verified_on: "2026-09-07"
     - id: C2
       claim: "The current Anchor-native fuzzing path may be `anchor fuzz` / Crucible; confirm which to teach."
       kind: api
@@ -23,6 +25,7 @@ research:
       status: gathering
       evidence: "TODO: confirm before writing the lab"
       value: null
+      recheck: "context7: query-docs anchor 'fuzz subcommand'; then `anchor fuzz --help`"
   code_to_ground:
     - id: K1
       what: "Trident fuzz target + invariant assertion"

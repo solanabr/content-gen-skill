@@ -50,7 +50,10 @@ skill change: run **`/doctor`** (verify toolchain), **`/setup-mcp`** (keys), and
 | `concept`, `api` — Solana docs/spec (authoritative) | **`solana-dev`** MCP — official Solana MCP at `https://mcp.solana.com/mcp` | `Solana_Documentation_Search`, `get_documentation`, `list_sections`, `Solana_Expert__Ask_For_Help` |
 | `api` — libraries/SDKs (Anchor, web3.js/kit, SPL) | **`context7`** MCP | resolve-library-id then query-docs |
 | `code` — Rust program snippets a lesson ships | **`solana-dev`** `program_autofixer` | run until clean before freezing the snippet |
-| `onchain-number` — rent, account sizes, priority fees | **`helius`** MCP | record exact value + unit + date in the claim's `value` |
+| `onchain-number` — rent, account sizes, priority fees | **`helius`** MCP | record exact value + unit + date in the claim's `value`; `recheck` is the RPC call itself |
+| `cli-default` — what a command does with no flags | **`local-execution`** (run it) · `context7` | `recheck` is the literal command; paste its output into `evidence` |
+| `version-pin` — a crate/npm/toolchain version an example builds against | **`context7`** · `local-execution` | keep in step with `references/pins.yaml`; `recheck` is `<tool> --version` or `npm view <pkg> version` |
+| `protocol-param` — slot time, epoch length, a feature gate's activation state | **`helius`** (gate account probe) · `solana-dev` · SIMD text | these change on epoch boundaries, so the probe must read the cluster, not the docs |
 | build/verify an artifact actually compiles/runs | **`surfpool`** MCP | local validator / mainnet-fork |
 | deep / multi-source / "is this still true?" | **`deep-research`** skill · **`solana-researcher`** / **`solana-guide`** agents | for contested ordering or ecosystem claims |
 | context hygiene / cross-lesson memory | **`context-mode`** (compress) · **`memsearch`** (persist) | keep grounded facts available across lessons |
@@ -88,8 +91,18 @@ pass uses, so the architect and the writer never disagree on sources.
 ## Honest scope
 Grounding raises accuracy; it does not replace human review. A generated course's
 technical claims still pass a **human accuracy gate** before publish (see
-`quality-bar.md`). `onchain-number` facts go stale — `cadence.release.freshness_policy`
-flips their `research.status` to `stale` for a re-pull.
+`quality-bar.md`).
+
+**Grounding is a first verification, not a permanent one.** Every claim carries
+`verified_on` and expires on a TTL set by its `kind` (`tools/course_lib.py` `TTL_DAYS`),
+and every claim of a machine-readable kind carries a runnable `recheck` probe.
+`tools/fact_freshness.py stale` is a blocking gate before publish and
+`tools/academy_export.py` refuses a course with an expired claim. `kind` extends the set
+above with `cli-default`, `version-pin`, and `protocol-param`; the re-check workflow, the
+TTL evidence, and the one-correction-sweeps-every-site rule are in
+[`../method/fact-recheck.md`](../method/fact-recheck.md). `cadence.release.freshness_policy`
+is read by that gate and may only **shorten** the `onchain-number` TTL for the lessons it
+scopes.
 
 
 ## Version freshness & atomic facts (hardening)
