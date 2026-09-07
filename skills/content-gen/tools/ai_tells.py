@@ -66,12 +66,20 @@ NEG_COMMA_SPLICE = re.compile(
     re.I,
 )
 
-# Frames worth watching: a small closed set of "X wearing a Y" style constructions
-# that generated prose reaches for. Kept explicit rather than inferred -- a generic
-# metaphor detector would fire on every good sentence in the corpus.
+# Frames worth watching: the "X wearing a Y" family, which generated prose reaches
+# for over and over. Kept explicit rather than inferred -- a generic metaphor
+# detector would fire on every good sentence in the corpus.
+#
+# `wearing` is matched bare, with no article. The first version required one
+# (`wearing (a|an|its|their)`) and undercounted badly: it found 10 instances in a
+# course that actually had 17, missing `wearing chain clothes`, `wearing better
+# clothes`, `wearing different logos` and `wearing the same 32-byte costume`. A
+# literal use ("a person wearing a hat") is vanishingly rare in technical prose, so
+# the bare verb is the right trade.
 FRAME = re.compile(
-    r"\b(wearing (a|an|its|their)\b|in (a|an) \w+(?:'s)? (suit|costume|coat|clothing)\b"
-    r"|dressed (up )?as\b|with good posture\b|\bmasquerading as\b)",
+    r"\b(wearing\b|costumes?\b|masquerading as\b|dressed (up )?as\b"
+    r"|in (a|an|its|different|better|new) \w*\s?(suit|coat|clothes|clothing|logos)\b"
+    r"|with good posture\b)",
     re.I,
 )
 
