@@ -183,6 +183,31 @@ artifact, not randomness.
 | Scope claims (mainnet/DEX/bridge) are taught or explicitly labelled bonus | JUDGE | agent / human read |
 | **A lesson's skill tags name what THAT lesson actually teaches, not what its module is about** | JUDGE (+ADVISORY at >80% identical per module) | agent / human read; `validate_course.py briefs` |
 | No open fix sweep: a corrected claim is corrected on every surface, and every image is newer than its HTML source | HARD | `validate_course.py fixes` + `tools/fix_sweep.py` |
+| **Prose tics stay under their measured rate: negation-then-reversal, a reused metaphor frame, a repeated sentence opener** | ADVISORY | `tools/ai_tells.py` |
+
+**The prose-tics row, concretely.** The em-dash rule caught the tell everyone knows about. Reading
+five shipped courses end to end surfaced three it misses, and the first is far more damaging than
+em-dashes because it is a *sentence shape*, not a character:
+
+1. **Negation-then-reversal** — *"A monitor that only runs when you remember to invoke it **is not a
+   monitor. It is** a rumor with a command line."* The negated half carries no information; the
+   sentence is stronger without it. ~330 instances across the five courses, roughly one per lesson,
+   and the steady rhythm is what reads as machine-written. Measured as a rate: the worst course sat
+   at 0.87 per 1k words before remediation and 0.65 after; the best is 0.14.
+2. **A reused metaphor frame** — one course reached for the same figure **19 times**: a plan
+   *"wearing an engineering costume"*, *"a judgment lesson wearing a build lesson's clothes"*, *"a
+   preference in a suit"*, *"a preference wearing a lab coat"*, *"a rumour with good posture"*,
+   *"the same mistake wearing different hats"*. Any one is good writing. Nineteen is one idea.
+3. **A repeated sentence opener** — *"Here is the …"* opened **34** sentences in one course,
+   including the second paragraph of four different lessons.
+
+**Two rules for fixing them, both learned the hard way.** First, *keep the load-bearing instances*:
+"chargeback fraud is not reduced, it is structurally impossible" is the sentence doing the teaching,
+because ruling out the wrong model **is** the lesson. Roughly half of every course's hits are of
+this kind, which is exactly why this row is ADVISORY and `ai_tells.py` prints sites rather than a
+verdict. Second, *vary the repair*: fixing all of them the same way (always dropping the negation,
+say) trades one tic for another. Use a mix — comma-merges, inversions, dropping the negation,
+semicolons, colons, restructures.
 
 **The skills-tag row, concretely.** The tags render on the learner's lesson card. They were derived
 from `module.teaches_skills`, so every lesson in a module got a byte-identical array *by
