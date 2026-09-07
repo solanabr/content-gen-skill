@@ -36,14 +36,28 @@ Agreement contract
 ------------------
 This is a port of `academy-courses/scripts/quiz_stats.py`, which gates the target
 repo. The two MUST agree on every number: same thresholds, same estimators, same
-permutation seed. Only three things differ, all deliberate:
+permutation seed. Verified 2026-09-07 by running both over the same three courses
+(`content/courses/<id>/manifest.json` vs `content/academy/courses/<id>/`): every
+statistic matched exactly, with the differences below.
 
   1. the loader — this one reads a content-gen `manifest.json`
      (`lessons[].brief.quiz_blocks`), that one reads an emitted `course.yaml` tree;
   2. em-dashes are ERROR here and INFO there — that script audits already-shipped
      content, this one gates a generator that must not emit them at all;
   3. every below-floor metric here emits an explicit INCONCLUSIVE finding. A quiet
-     pass is the failure mode this whole workstream exists to remove.
+     pass is the failure mode this whole workstream exists to remove;
+  4. LESSON ORDER, which is a real divergence and not a preference. The two
+     order-dependent metrics (order-1/order-2 Markov accuracy) disagreed on
+     solana-speedrun: 66.7%/75.0% there against 77.8%/100.0% here. The cause is
+     that quiz_stats.py breaks ties WITHIN a module by lesson-directory name, and
+     emitted lesson directories are bare slugs, so `como-funciona` sorts before
+     `por-que-solana` even though it is lesson 2. This module uses the manifest's
+     authoritative `(module index, lesson.order)`, which is the order a learner
+     actually meets the questions in and therefore the only order the sequential
+     test means anything in. The fix belongs in quiz_stats.py (its `course.yaml`
+     modules list carries the lesson ids in order; it should index into that rather
+     than sort by directory name). Until then, treat its Markov numbers on any
+     multi-lesson module as a lower bound.
 
     python3 quiz_metrics.py --course content/courses/<id>
     python3 quiz_metrics.py --manifest manifest.json --json
