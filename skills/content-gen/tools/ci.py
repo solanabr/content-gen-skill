@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """ci.py — lean CI for the whole course suite (stdlib-only).
 
+  Tier 0  pins      the skill's OWN version pins are fresh, single-sourced, and rendered
+                    into verify/Dockerfile (pin_refresh.py). This tier exists because the
+                    Dockerfile silently drifted a major version behind the content it
+                    verifies; an anti-staleness system needs its own staleness gate.
   Tier 1  gates     tool selftests + validate_course all (incl. drafts) on every
                     course found, + writer-style facts/tells on every draft when
                     the writer-style skill is resolvable
@@ -9,14 +13,27 @@
                     time-to-first-do) — the text-block-aesthetics dashboard
   Tier 4  smoke     collect per-lesson verify commands; list them (default) or
                     execute the allowlisted ones with --run-smoke
-  Tier 5  verify     compile/run every fenced code block the courses ship
+  Tier 5  verify    compile/run every fenced code block the courses ship
                     (verify_code.py). A real compile/run FAILURE fails the tier;
                     a SKIP (toolchain needs the pinned container) is reported, not
                     failed. Set VERIFY_ENV=docker to run against the pinned image.
+  Tier 6  challenge THE PLATFORM CONTRACT: for every coding challenge, the SOLUTION passes
+                    every tests.json case and the STARTER fails at least one
+                    (verify_challenges.py). This is the one rule the Academy actually
+                    executes on every PR, and it was not a CI tier at all.
+  Tier 7  blocks    compile every rust/typescript block against the course's DECLARED deps
+                    (verify_blocks.py), which verify_code.py has never done for those three
+                    languages. Heavy (npm install / cargo build): opt in with --run-blocks.
 
-    python3 ci.py                     # tiers 1-5 (smoke = list only)
+    python3 ci.py                     # tiers 0-7 (smoke = list only, blocks = listed)
     python3 ci.py --tiers 1,3         # subset
     python3 ci.py --run-smoke         # tier 4 executes allowlisted commands
+    python3 ci.py --run-blocks        # tier 7 actually compiles
+    python3 ci.py --strict            # SKIP IS NOT PASS: any skipped tier fails
+
+`--strict` exists because this repo learned the hard way that a SKIP counted as green is how
+unverified content ships. Under --strict a tier that could not run is a failure, so "GREEN"
+always means "everything was actually checked".
 
 Exit 0 = all green; 1 = any failure. Courses discovered under the skill's
 examples/ and the repo's content/courses/.
@@ -26,6 +43,7 @@ from __future__ import annotations
 import argparse
 import copy
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -34,10 +52,23 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import validate_course as vc                      # noqa: E402
 import verify_code as vcode                        # noqa: E402
+import verify_challenges as vchal                  # noqa: E402
+import verify_blocks as vblocks                    # noqa: E402
+import pin_refresh                                 # noqa: E402
 from course_lib import load_manifest, flatten_lessons  # noqa: E402
 
 REPO = HERE.parent.parent.parent
+# Seeds verify_code's bash tier-3 execution allowlist; kept here because tier 4 (brief verify
+# commands) and bash tier 3 must never diverge on what counts as side-effect-free.
 SMOKE_ALLOWLIST = {"python3", "python", "shasum", "sha256sum", "printf", "echo", "openssl"}
+
+STRICT = False
+
+
+def _skip(msg: str) -> bool:
+    """A tier that could not run. Green normally, RED under --strict: SKIP is not PASS."""
+    print(("FAIL" if STRICT else "skip") + f" - {msg}" + (" [--strict]" if STRICT else ""))
+    return not STRICT
 
 
 def course_dirs() -> list[Path]:
@@ -90,11 +121,22 @@ def writer_style_dir() -> Path | None:
     return None
 
 
+def t0_pins() -> bool:
+    """The skill's own pins. See pin_refresh.py — this is the recursion guard."""
+    rc = pin_refresh.check(do_probe=False, strict_sourcing=True)
+    print(("PASS" if rc == 0 else "FAIL") + " - pins fresh, single-sourced, rendered")
+    return rc == 0
+
+
 def t1_gates() -> bool:
     ok = True
     r = subprocess.run([sys.executable, str(HERE / "test_tools.py")],
                        capture_output=True, text=True)
     print(("PASS" if r.returncode == 0 else "FAIL") + " - tool selftests")
+    if r.returncode != 0:
+        for line in (r.stdout + r.stderr).splitlines():
+            if line.startswith("FAIL") or "Error" in line or "Traceback" in line:
+                print(f"   {line[:120]}")
     ok = ok and r.returncode == 0
 
     for d in course_dirs():
@@ -116,8 +158,8 @@ def t1_gates() -> bool:
 
     w = writer_style_dir()
     if w is None:
-        print("skip - writer-style not installed (or set WRITER_STYLE_SKILL); facts/tells skipped")
-        return ok
+        return _skip("writer-style not installed (or set WRITER_STYLE_SKILL); "
+                     "facts/tells not checked") and ok
     vv = w / "tools" / "validate_voice.py"
     card = w / "profiles" / "kaue" / "kaue.card.yaml"
     for d in course_dirs():
@@ -244,13 +286,106 @@ def t5_verify() -> bool:
     return ok
 
 
+def t6_challenges() -> bool:
+    """THE platform contract: solution passes every test, starter fails at least one.
+
+    verify_challenges.py has proved this since it was written and was never a CI tier, so the
+    single rule the Academy executes on every PR was the one rule CI did not check. A SKIP here
+    means a toolchain was missing and the contract went UNPROVEN, which under --strict is a
+    failure -- "SKIP is not PASS" is a law this repo learned the hard way.
+    """
+    ok, any_course = True, False
+    for d in course_dirs():
+        chs = vchal.discover(d)
+        if not chs:
+            continue
+        any_course = True
+        rows = [vchal.verify_one(c, d, skip_rust=False) for c in chs]
+        fails = [r for r in rows if r["status"] == "FAIL"]
+        skips = [r for r in rows if r["status"] == "SKIP"]
+        for r in fails:
+            print(f"   FAIL {d.name}/{r['tag'][:50]}: {r.get('why', '')[:70]}")
+        n_pass = sum(1 for r in rows if r["status"] == "PASS")
+        print(("PASS" if not fails else "FAIL")
+              + f" - challenges {d.name} ({n_pass} PASS · {len(fails)} FAIL · {len(skips)} SKIP)")
+        ok = ok and not fails
+        if skips:
+            reasons = sorted({(r.get("why") or "toolchain unavailable")[:60] for r in skips})
+            ok = _skip(f"challenges {d.name}: {len(skips)} unproven ({'; '.join(reasons)})") and ok
+    if not any_course:
+        return _skip("no coding challenges found in any course")
+    return ok
+
+
+def t7_blocks(run: bool) -> bool:
+    """Compile every rust/typescript block against the course's DECLARED deps.
+
+    verify_blocks.py is 1366 lines with 31 selftests and was referenced by nothing: not
+    SKILL.md, not test_tools.py, not ci.py. It is the only thing in the repo that actually
+    compiles rust and typescript lesson blocks -- verify_code.py returns SKIP for all three of
+    those languages in every environment, container included.
+
+    Heavy (npm install + cargo build per course), so execution is opt-in; the tier always
+    reports what it WOULD run, and --strict turns "did not run" into a failure.
+    """
+    ok, found = True, 0
+    have = {"ts": bool(shutil.which("npm")), "rust": bool(shutil.which("cargo"))}
+    for d in course_dirs():
+        drafts = d / "lessons" / "drafts"
+        if not drafts.is_dir():
+            continue
+        for lang in ("ts", "rust"):
+            blocks = vblocks.gather(d, lang)
+            if not blocks:
+                continue
+            found += 1
+            cmd = f"python3 tools/verify_blocks.py {d.name} --lang {lang}"
+            if not run:
+                print(f"   blocks {d.name} --lang {lang}: {len(blocks)} block(s)  [{cmd}]")
+                ok = _skip(f"blocks {d.name}/{lang} not compiled (pass --run-blocks)") and ok
+                continue
+            if not have[lang]:
+                ok = _skip(f"blocks {d.name}/{lang}: "
+                           f"{'npm' if lang == 'ts' else 'cargo'} not installed") and ok
+                continue
+            r = subprocess.run([sys.executable, str(HERE / "verify_blocks.py"), str(d),
+                                "--lang", lang], capture_output=True, text=True)
+            tail = [l for l in r.stdout.splitlines() if "PASS" in l and "FAIL" in l]
+            print(("PASS" if r.returncode == 0 else "FAIL")
+                  + f" - blocks {d.name} --lang {lang}"
+                  + (f" ({tail[-1].strip()})" if tail else ""))
+            if r.returncode != 0:
+                for line in r.stdout.splitlines():
+                    if line.lstrip().startswith("FAIL"):
+                        print(f"   {line.strip()[:120]}")
+            ok = ok and r.returncode == 0
+    if not found:
+        return _skip("no rust/typescript blocks found in any course")
+    return ok
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="lean CI for the course suite")
-    ap.add_argument("--tiers", default="1,2,3,4,5")
-    ap.add_argument("--run-smoke", action="store_true")
+    ap.add_argument("--tiers", default="0,1,2,3,4,5,6,7")
+    ap.add_argument("--run-smoke", action="store_true",
+                    help="tier 4: execute the allowlisted brief verify commands")
+    ap.add_argument("--run-blocks", action="store_true",
+                    help="tier 7: actually compile rust/ts blocks (npm install + cargo build)")
+    ap.add_argument("--exec-bash", action="store_true",
+                    help="tier 5: enable bash tier 3 (run execution-allowlisted blocks)")
+    ap.add_argument("--strict", action="store_true",
+                    help="SKIP IS NOT PASS: any tier that could not run fails the build")
+    ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args(argv)
+    if a.selftest:
+        return selftest()
+    globals()["STRICT"] = a.strict
+    if a.exec_bash:
+        vcode.BASH_EXEC = True
     tiers = {t.strip() for t in a.tiers.split(",")}
     ok = True
+    if "0" in tiers:
+        print("== tier 0: pins =="); ok = t0_pins() and ok
     if "1" in tiers:
         print("== tier 1: gates =="); ok = t1_gates() and ok
     if "2" in tiers:
@@ -261,7 +396,11 @@ def main(argv=None) -> int:
         print("== tier 4: smoke =="); ok = t4_smoke(a.run_smoke) and ok
     if "5" in tiers:
         print("== tier 5: verify =="); ok = t5_verify() and ok
-    print("\nCI: " + ("GREEN" if ok else "RED"))
+    if "6" in tiers:
+        print("== tier 6: challenge contract =="); ok = t6_challenges() and ok
+    if "7" in tiers:
+        print("== tier 7: block compile =="); ok = t7_blocks(a.run_blocks) and ok
+    print("\nCI: " + ("GREEN" if ok else "RED") + (" (--strict)" if a.strict else ""))
     return 0 if ok else 1
 
 
@@ -317,6 +456,40 @@ def selftest() -> int:
         os.environ.pop("WRITER_STYLE_SKILL", None)
         if prev is not None:
             os.environ["WRITER_STYLE_SKILL"] = prev
+
+    # ── --strict: SKIP is not PASS ──
+    # _skip() prints; capture it so the probe's own "FAIL - ... [--strict]" line does not read
+    # as a real failure in test_tools.py output.
+    import contextlib
+    import io
+    prev_strict = globals()["STRICT"]
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            globals()["STRICT"] = False
+            lenient = _skip("probe")
+            globals()["STRICT"] = True
+            strict = _skip("probe")
+        chk(lenient is True, "a skipped tier is green by default")
+        chk(strict is False, "a skipped tier is RED under --strict")
+        chk("[--strict]" in buf.getvalue(), "a strict-mode skip says why it failed")
+    finally:
+        globals()["STRICT"] = prev_strict
+
+    # ── the two formerly-orphaned verifiers are reachable AND wired ──
+    # Both were fully working and referenced by nothing. Importability is not the point; being
+    # a tier is. These assertions are what stops either of them going orphan again.
+    chk(callable(getattr(vchal, "verify_one", None)) and callable(getattr(vchal, "discover", None)),
+        "verify_challenges' contract API is importable")
+    chk(callable(getattr(vblocks, "gather", None)), "verify_blocks' block gatherer is importable")
+    src = Path(__file__).read_text("utf-8")
+    for name, tier in (("vchal.verify_one", "6"), ("vblocks.gather", "7"),
+                       ("pin_refresh.check", "0")):
+        chk(name in src, f"tier {tier} actually calls {name}")
+    chk("t6_challenges" in src and "t7_blocks" in src and "t0_pins" in src,
+        "tiers 0/6/7 are defined")
+    for t in ("0", "6", "7"):
+        chk(f'"{t}" in tiers' in src, f"tier {t} is dispatched from main()")
 
     return 0 if ok else 1
 

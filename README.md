@@ -31,6 +31,21 @@ per-lesson briefs.
 none|light|rich`, `--brief-only` to stop at structure). Courses run
 `/architect-course` and gate on `/validate-course`.
 
+## Three names, one thing
+
+Before anything else, because it costs every new reader ten minutes: the repo, the skill and
+the plugin have three different names, and **none of them should be renamed.**
+
+| Layer | Name | Fixed in |
+|---|---|---|
+| clone directory | `course-creator-skill` (historical) | your filesystem |
+| git remote | `content-gen-skill` | `git remote -v` |
+| the skill you invoke | **`content-gen`** | `skills/content-gen/SKILL.md` frontmatter |
+| the plugin you install | `content-gen-skill@solanabr` | `.claude-plugin/plugin.json` |
+
+The plugin name is install-visible — renaming it breaks every existing install — and the skill
+name is what an agent actually routes on. Read `skills/content-gen/`; ignore the rest.
+
 ## Install
 
 ```bash
@@ -90,25 +105,43 @@ non-compiling `CpiContext`, an `ImportError`, a missing `__main__` guard). The
 
 ```bash
 # compile/run every fenced code block a piece ships
-python3 skills/content-gen/tools/verify_code.py content/courses/<id>          # local toolchains
-python3 skills/content-gen/tools/verify_code.py content/courses/<id> --harness # + real anchor build + tsc
-python3 skills/content-gen/tools/verify_code.py content/<slug> --run-smoke    # + each brief's verify cmd
-VERIFY_ENV=docker python3 skills/content-gen/tools/ci.py --tiers 5            # pinned, version-matched
-VERIFY_HARNESS=1 python3 skills/content-gen/tools/ci.py --tiers 5             # CI: run the harnesses too
+python3 skills/content-gen/tools/verify_code.py content/courses/<id>            # local toolchains
+python3 skills/content-gen/tools/verify_code.py content/courses/<id> --harness  # + real anchor build + tsc
+python3 skills/content-gen/tools/verify_code.py content/<slug> --run-smoke      # + each brief's verify cmd
+python3 skills/content-gen/tools/verify_code.py content/courses/<id> --bash-tiers   # per-tier bash verdicts
+python3 skills/content-gen/tools/verify_code.py content/courses/<id> --exec-bash    # bash tier 3 on
+python3 skills/content-gen/tools/verify_blocks.py content/courses/<id> --lang ts    # really compile TS
+python3 skills/content-gen/tools/verify_blocks.py content/courses/<id> --lang rust  # really compile Rust
+VERIFY_ENV=docker python3 skills/content-gen/tools/ci.py --tiers 5              # pinned, version-matched
+VERIFY_HARNESS=1 python3 skills/content-gen/tools/ci.py --tiers 5               # CI: run the harnesses too
+python3 skills/content-gen/tools/ci.py --run-blocks --strict                    # nothing left unchecked
 ```
 
+- **Three-tier bash checking.** `bash -n` is a *syntax* check, and an audit of a shipped course
+  found four majors that were valid bash and simply no longer run: `forge create` without
+  `--broadcast` (a silent dry run on Foundry 1.x <!-- pins-ok: names the major whose default changed, not a pin -->), `openssl dgst -<digest> -sign` against an
+  Ed25519 key (OpenSSL 3 refuses), and Bitcoin Core's fee and wallet-loading defaults. So bash
+  is checked in three tiers — **syntax**, then **surface currency** against the evidenced
+  ledger in `references/command-surfaces.yaml`, then optional **execution** of
+  side-effect-free commands (`--exec-bash`). Prose-embedded commands (backticked, in a
+  sentence) are checked too; nothing checked those before.
+- **Rust and TypeScript are compiled by `verify_blocks.py`, not here.** `verify_code.py`
+  returns `SKIP` for rust/ts/js in *every* environment, container included, so its green for
+  those languages was always vacuous. `verify_blocks.py` compiles them against the course's
+  **declared** deps and triages missing-fragment-context errors apart from real defects.
 - **Real materialized harnesses.** A piece can ship a `verify-ts/` (a `tsc` project) and
   `verify-anchor/*/` (`anchor init` workspaces) beside it: the lesson code assembled into
   an actually-buildable project. `--harness` runs `tsc --noEmit` and `anchor build` against
   them, so the exact code the reader copies is compiler-checked, not just per-block linted.
 - **Pinned, version-matched toolchain.** `verify/Dockerfile` installs anchor, forge,
-  cargo, solana, node, and python at *the versions the content declares* (not whatever
-  is on the author's machine). `--env docker` runs against it; a local toolchain that
-  disagrees is reported, never trusted.
+  cargo, solana, node, and python at the versions in `references/pins.yaml`, which is the
+  single source of truth for every number this skill asserts. The Dockerfile's `ARG` block is
+  **generated** from it, and `pin_refresh.py check` (CI tier 0) fails when the two drift, when
+  a doc contradicts the pins, or when pins.yaml passes its own TTL.
 - **`FAIL` blocks done; `SKIP` never silently passes.** A `FAIL` is a real compile or run
-  break. A `SKIP` means that language needs the container, and the tool says so loudly, so
-  "green" can never mean "nothing was checked."
-- **Wired into CI as tier 5** (`ci.py`) and documented as a hard step in
+  break. A `SKIP` means something could not be checked, and `ci.py --strict` turns every SKIP
+  into a failure, so "green" can never mean "nothing was checked."
+- **Wired into CI as tiers 5, 6 and 7** (`ci.py`) and documented as a hard step in
   `forms/course.md`. It applies to every form, because any form can ship code.
 
 ## Academy quizzes, coding challenges & publishing
@@ -161,6 +194,27 @@ to weigh. Subcommands: `dag` · `briefs` · `ladder` · `capstone` · `outcomes`
 There is intentionally **no "course score"**; pedagogical quality is a human/agent
 judgement (`references/quality-bar.md`). Non-course forms gate on their form-file
 checklist.
+
+## Staying current
+
+Everything above only works if the skill's own numbers are true. They live in one file:
+
+```bash
+python3 skills/content-gen/tools/pin_refresh.py check --probe  # TTL + Dockerfile + docs + local drift
+python3 skills/content-gen/tools/pin_refresh.py render         # pins.yaml -> the Dockerfile ARG block
+python3 skills/content-gen/tools/pin_refresh.py surfaces       # re-probe the command-surface ledger
+```
+
+- `references/pins.yaml` is the **only** place a version number is authored. Docs that
+  contradict it fail CI tier 0; docs that legitimately differ are allowlisted *in the same
+  file*, with a reason.
+- It carries `pinned_on` + `ttl_days` and **fails once it expires**. That is deliberate: the
+  previous, prose-based pins drifted a full major version behind the content they gate
+  (`SOLANA=v2.1.0` while the authoring machine ran `solana-cli 3.1.10`), <!-- pins-ok: the historical drift this guard exists to prevent -->
+  and an anti-staleness system with no expiry rots exactly the same way.
+- `references/command-surfaces.yaml` records CLI surfaces that moved. Every rule carries
+  `evidence:` naming how the claim was established — a local probe, a local run, or a vendor
+  doc. Rules from memory are not accepted.
 
 ## Repo layout
 ```
