@@ -69,6 +69,38 @@ WEAK_BLOOM_VERBS = {"know", "understand", "learn", "be aware", "appreciate", "gr
 CHALLENGE_LANGS = {"rust", "typescript"}            # the Academy code runner compiles ONLY these
 CHALLENGE_BUILD_TYPES = {"standard", "buildable"}   # code.buildType enum (deployable is a separate bool)
 
+# ── the continuity ledger (lesson-brief-schema §C `ledger`) ─────────────────────
+# Every symbol is `<kind>:<name>`. The kind is closed so the call-site scanner in
+# continuity.py knows which entries are code identifiers it may look for in a fence
+# (fn/type/const/ix) and which are not (cmd/file/env/account/artifact).
+#
+# `artifact` is the BRIDGE kind: the legacy `brief.artifact.{id,consumes}` edge is
+# read as `artifact:<id>` in the same graph, so the accretion ladder and the symbol
+# ledger are one DAG and not two systems that can disagree.
+SYMBOL_KINDS = {
+    "fn":       "a function/method the reader writes here and calls later",
+    "type":     "a struct / interface / account layout / type alias",
+    "const":    "a named constant, seed literal, or program id",
+    "ix":       "a program instruction (the on-chain entry point name)",
+    "cmd":      "a runnable command the reader is told to re-use ('npm run mint')",
+    "file":     "a source file treated as a named handle ('file:scripts/mint.ts')",
+    "env":      "an environment variable / config key the later lessons read",
+    "account":  "a named on-chain account or PDA",
+    "artifact": "a rung of the artifact ladder (bridge from brief.artifact.id)",
+}
+# Kinds whose `name` is a code identifier the fence scanner may search for.
+CODE_SYMBOL_KINDS = {"fn", "type", "const", "ix"}
+SYMBOL_RE = re.compile(r"^([a-z][a-z0-9_]*):(\S.*)$")
+LEDGER_KEYS = ("state_in", "state_out", "opens", "emits", "provides", "consumes", "renames")
+# Documented in references/output-contract.md for the tool's whole life and implemented
+# by nothing. Accepted here only so a brief written against that doc is TOLD where the
+# field went, instead of being silently ignored a second time.
+LEDGER_LEGACY_KEYS = {
+    "artifact_state_in": "ledger.state_in",
+    "artifact_state_out": "ledger.state_out",
+    "carry_forward": "ledger.provides / ledger.emits (enumerate symbols, don't narrate)",
+}
+
 # Strings in an `assessment` field that mean "watch/read", i.e. NOT gated on doing.
 PASSIVE_ASSESSMENT_RE = re.compile(
     r"\b(watch|read|review the video|listen|observe)\b", re.I
@@ -260,6 +292,156 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+# ── continuity ledger: parsing + derivation ─────────────────────────────────────
+
+def split_top_level(s: str, sep: str = ",") -> list[str]:
+    """Split `s` on `sep` at bracket depth 0, honoring () [] {} and quotes.
+
+    Shared on purpose: the ledger's signature parser and continuity.py's call-site
+    scanner both count arguments with THIS function, so the two can never disagree
+    about how many arguments a call has. Angle brackets are deliberately NOT tracked
+    -- `a < b` in a call site is far more common than a comma inside `HashMap<K, V>`,
+    and mistaking a comparison for a generic would over-count real calls. Declare
+    `arity:` explicitly for a signature with a comma inside a generic."""
+    out, buf, depth, quote, esc = [], [], 0, "", False
+    for ch in s:
+        if esc:
+            buf.append(ch); esc = False; continue
+        if quote:
+            buf.append(ch)
+            if ch == "\\":
+                esc = True
+            elif ch == quote:
+                quote = ""
+            continue
+        if ch in "\"'`":
+            quote = ch; buf.append(ch); continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == sep and depth == 0:
+            out.append("".join(buf)); buf = []
+            continue
+        buf.append(ch)
+    out.append("".join(buf))
+    return [p.strip() for p in out]
+
+
+def _arity_from_sig(sig: str) -> tuple[int, int | None]:
+    """(min_args, max_args) from a signature string. `max` is None for varargs.
+
+    A default (`=`), an optional marker (`?`), or a Rust `Option<..>` widens the span
+    downward: a helper declared `(a, b, c = None)` is legitimately called with 2 or 3
+    arguments, and a scanner that insisted on 3 would manufacture a false positive on
+    every correct call site."""
+    s = sig.strip()
+    if s.startswith("(") and s.endswith(")"):
+        s = s[1:-1]
+    parts = [p for p in split_top_level(s) if p]
+    if not parts:
+        return 0, 0
+    hi_open = any(p.startswith(("*", "...")) or p.endswith("...") for p in parts)
+    req = 0
+    for p in parts:
+        if p.startswith(("*", "...")) or p.endswith("..."):
+            continue
+        name = p.split(":")[0].strip()
+        optional = ("=" in p) or name.endswith("?") or p.strip().startswith("Option<")
+        if not optional:
+            req += 1
+    hard = len([p for p in parts if not (p.startswith(("*", "...")) or p.endswith("..."))])
+    return req, (None if hi_open else hard)
+
+
+def parse_symbol(entry) -> dict:
+    """Normalize ONE provides/consumes entry.
+
+    Accepts a bare string (`"fn:derive_vault_pda"`) or a dict
+    (`{symbol|id, sig, arity, terminal, note}`). Returns
+    `{symbol, kind, name, lo, hi, sig, terminal, error}`; `error` non-empty means the
+    entry is malformed and the caller should flag it rather than silently drop it --
+    a typo'd kind that quietly disables checking is the exact hole this gate exists
+    to close."""
+    sig, terminal, note = "", None, ""
+    if isinstance(entry, dict):
+        raw = str(entry.get("symbol") or entry.get("id") or "").strip()
+        sig = str(entry.get("sig") or "").strip()
+        terminal = entry.get("terminal")
+        note = str(entry.get("note") or "")
+        arity = entry.get("arity")
+    else:
+        raw, arity = str(entry or "").strip(), None
+    out = {"symbol": raw, "kind": "", "name": "", "lo": None, "hi": None,
+           "sig": sig, "terminal": terminal, "note": note, "error": ""}
+    if not raw:
+        out["error"] = "empty symbol entry"
+        return out
+    m = SYMBOL_RE.match(raw)
+    if not m:
+        out["error"] = (f"symbol '{raw}' is not '<kind>:<name>' "
+                        f"(kinds: {', '.join(sorted(SYMBOL_KINDS))})")
+        return out
+    kind, name = m.group(1), m.group(2).strip()
+    if kind not in SYMBOL_KINDS:
+        out["error"] = f"unknown symbol kind '{kind}:' in '{raw}' (kinds: {', '.join(sorted(SYMBOL_KINDS))})"
+        return out
+    out["kind"], out["name"] = kind, name
+    if isinstance(arity, int):
+        out["lo"] = out["hi"] = arity
+    elif isinstance(arity, (list, tuple)) and len(arity) == 2:
+        out["lo"], out["hi"] = arity[0], arity[1]
+    elif sig:
+        out["lo"], out["hi"] = _arity_from_sig(sig)
+    return out
+
+
+def _as_list(v) -> list:
+    if v is None:
+        return []
+    return list(v) if isinstance(v, (list, tuple)) else [v]
+
+
+def derive_ledger(lesson: dict) -> dict:
+    """The continuity ledger for one lesson -- ONE graph, not two.
+
+    Merges the explicit `brief.ledger` with the legacy `brief.artifact` accretion
+    edge, which is read as a VIEW over the same graph (`artifact.id` -> the symbol
+    `artifact:<id>`, each `consumes` entry -> `artifact:<that id>`). A course that
+    declares only `artifact` still gets a real continuity graph; a course that
+    declares only `ledger` still gets its accretion ladder checked."""
+    b = lesson.get("brief") or {}
+    led = b.get("ledger") or {}
+    if not isinstance(led, dict):
+        led = {}
+    out = {
+        "lesson": lesson.get("id", "?"),
+        "kind": b.get("kind", "build"),
+        "declared": bool(led),
+        "state_in": str(led.get("state_in") or "").strip(),
+        "state_out": str(led.get("state_out") or "").strip(),
+        "opens": [str(p).strip() for p in _as_list(led.get("opens")) if str(p).strip()],
+        "emits": [str(p).strip() for p in _as_list(led.get("emits")) if str(p).strip()],
+        "provides": [parse_symbol(e) for e in _as_list(led.get("provides"))],
+        "consumes": [parse_symbol(e) for e in _as_list(led.get("consumes"))],
+        "renames": [r for r in _as_list(led.get("renames")) if isinstance(r, dict)],
+        "legacy": [k for k in LEDGER_LEGACY_KEYS if b.get(k) or led.get(k)],
+    }
+    art = b.get("artifact")
+    if isinstance(art, dict) and art.get("id"):
+        out["provides"].append(parse_symbol(
+            {"symbol": f"artifact:{art['id']}", "terminal": art.get("terminal")}))
+        for c in _as_list(art.get("consumes")):
+            if str(c).strip():
+                out["consumes"].append(parse_symbol(f"artifact:{str(c).strip()}"))
+    return out
+
+
+def course_ledgers(manifest: dict) -> list[dict]:
+    """Derived ledgers for every lesson, in canonical course order."""
+    return [derive_ledger(l) for l in flatten_lessons(manifest)]
+
+
 # ── DAG helpers ─────────────────────────────────────────────────────────────────
 
 def topo_sort(nodes: list[str], edges: list[list[str]]) -> tuple[list[str], list[str]]:
@@ -340,6 +522,45 @@ def selftest() -> int:
           "artifact ladder ordered")
     check(CHALLENGE_LANGS == {"rust", "typescript"} and "buildable" in CHALLENGE_BUILD_TYPES,
           "academy challenge vocab loaded")
+
+    # ── continuity ledger ──────────────────────────────────────────────────────
+    check(split_top_level("a, b, c") == ["a", "b", "c"], "split_top_level: flat args")
+    check(split_top_level("a, f(x, y), [1, 2]") == ["a", "f(x, y)", "[1, 2]"],
+          "split_top_level: nesting is not split")
+    check(split_top_level('a, "x, y", b') == ["a", '"x, y"', "b"],
+          "split_top_level: a comma inside a string is not a separator")
+    check(split_top_level("a < b, c") == ["a < b", "c"],
+          "split_top_level: a comparison is not a generic")
+
+    check(_arity_from_sig("(a, b, c)") == (3, 3), "arity: three required")
+    check(_arity_from_sig("(a, b, c = None)") == (2, 3), "arity: a default widens the span down")
+    check(_arity_from_sig("(a, b?)") == (1, 2), "arity: an optional marker widens the span")
+    check(_arity_from_sig("(a, *rest)") == (1, None), "arity: varargs is unbounded above")
+    check(_arity_from_sig("()") == (0, 0), "arity: no args")
+
+    s = parse_symbol("fn:derive_vault_pda")
+    check(s["kind"] == "fn" and s["name"] == "derive_vault_pda" and not s["error"],
+          "parse_symbol: bare string")
+    s = parse_symbol({"symbol": "fn:mint", "sig": "(conn, payer, amount)"})
+    check((s["lo"], s["hi"]) == (3, 3), "parse_symbol: dict form derives arity from sig")
+    check(parse_symbol("derive_vault_pda")["error"], "parse_symbol: bare name is an error")
+    check(parse_symbol("func:x")["error"], "parse_symbol: unknown kind is an error")
+    check(parse_symbol("cmd:npm run mint")["name"] == "npm run mint",
+          "parse_symbol: a cmd name may contain spaces")
+
+    led = derive_ledger({"id": "l1", "brief": {
+        "artifact": {"id": "vault", "consumes": ["counter"], "terminal": "why"},
+        "ledger": {"provides": ["fn:derive_vault_pda"], "emits": ["src/vault.rs"],
+                   "state_out": "a vault program that builds"}}})
+    prov = {p["symbol"] for p in led["provides"]}
+    cons = {c["symbol"] for c in led["consumes"]}
+    check(prov == {"fn:derive_vault_pda", "artifact:vault"},
+          "derive_ledger: the artifact edge joins the SAME provides graph")
+    check(cons == {"artifact:counter"}, "derive_ledger: artifact.consumes becomes artifact:<id>")
+    check(led["emits"] == ["src/vault.rs"] and led["declared"], "derive_ledger: paths + declared flag")
+    legacy = derive_ledger({"id": "l2", "brief": {"artifact_state_in": "x", "carry_forward": "y"}})
+    check(set(legacy["legacy"]) == {"artifact_state_in", "carry_forward"},
+          "derive_ledger: the never-implemented output-contract fields are reported, not ignored")
 
     print("\n" + ("COURSE_LIB SELFTESTS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1

@@ -19,6 +19,16 @@ shape:
 | `validate_course.py` install-steps | matched `for`**`get`**`s` in prose as the `forge` CLI | scope the match to **fenced code**, not the whole file |
 | `render_visuals.py render-banner` | matched `banner-bg-blur.png` inside the scaffold's **own authoring comment**, so every pure-brand banner was misread as photo mode and failed | test **comment-stripped** markup (`_COMMENT_RE`) |
 | `verify_challenges.py` Rust entry point | took the **first** `fn` in the file, which for a trait-modelling challenge is `fn check(&self, ..)`; it generated an uncallable `check(500, 100)` and reported the *solution* as failing every test | select **structurally** — prefer a column-0 `fn` with no `self` |
+| `continuity.py` call-site scan | a Python `def transfer(sender, receiver, amount)` in module 0 vs an Anchor `transfer(cpi_ctx, amount)` in module 5 — one common English word, two unrelated symbols | compare **within one language**, never across |
+| `continuity.py` call-site scan | a helper redefined in a later lesson's own fences was still measured against module 2's version — a defect reported in the one place a reader could not possibly be confused | use the **nearest preceding** definition, and skip a lesson that re-establishes the symbol itself |
+| `continuity.py` call-site scan | blanking string literals to spaces deleted an argument: `toBaseUnits("1.50", DECIMALS)` counted as ONE arg, so every correct call became a hit | blank the string **contents**, keep the delimiters |
+| `continuity.py` definitions | `const body = (await res.json()) as Shape` read as a one-parameter arrow function, so every later `body()` was a mismatch | an arrow definition must be **followed by `=>`**; the keyword alone is not the structure |
+
+The four `continuity.py` rows are one shakedown of one tool against the ten courses in
+`content/courses/`: 93 hits, 36.8% of inspected call sites, before those four fixes; 16 hits
+and no mis-parses after. **Run the corpus before you believe a checker**, and prefer the fix
+that names the missing structure (same language, nearest definition, real arrow syntax) over
+the fix that adds a name to a stoplist.
 
 The rule, for every checker this skill ships:
 

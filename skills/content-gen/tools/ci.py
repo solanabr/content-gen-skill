@@ -189,6 +189,20 @@ def t2_fixtures() -> bool:
     def mut_signature(m): m["lessons"][0]["brief"]["hook"] = "like the Movie Review app"
     def mut_passive(m): m["lessons"][0]["brief"]["assessment"] = "watch the recording"
     def mut_capstone(m): m["assessment"]["capstone"]["requires_skills"] = ["never-taught"]
+    # The audited defect class, one fixture each: a lesson opening on a scaffold the
+    # course never ships, a symbol used before it exists, and a helper that grew an
+    # argument mid-course with the later call sites left behind.
+    def mut_opens(m): m["lessons"][1]["brief"]["ledger"] = {"opens": ["swap.js"]}
+    def mut_consumes(m): m["lessons"][1]["brief"]["ledger"] = {"consumes": ["fn:derive_vault_pda"]}
+    def mut_sigdrift(m):
+        m["lessons"][0]["brief"]["ledger"] = {"provides": [{"symbol": "fn:mint", "sig": "(a, b)"}]}
+        m["lessons"][1]["brief"]["ledger"] = {"provides": [{"symbol": "fn:mint", "sig": "(a, b, c)"}]}
+    def mut_stale_rename(m):
+        m["lessons"][0]["brief"]["ledger"] = {"provides": ["fn:init_vault"]}
+        m["lessons"][1]["brief"]["ledger"] = {
+            "provides": ["fn:initialize"], "consumes": ["fn:init_vault"],
+            "renames": [{"from": "fn:init_vault", "to": "fn:initialize",
+                         "since_lesson": "pda-state"}]}
 
     fixtures = [
         ("non-kebab id", mut_id, vc.check_dag, "not kebab-case"),
@@ -197,6 +211,10 @@ def t2_fixtures() -> bool:
         ("corpus signature", mut_signature, vc.check_briefs, "corpus signature"),
         ("passive assessment", mut_passive, vc.check_briefs, "passive"),
         ("untaught capstone skill", mut_capstone, vc.check_capstone, ""),
+        ("opens an unshipped scaffold", mut_opens, vc.check_continuity, "no earlier lesson emits"),
+        ("consumes an unbuilt symbol", mut_consumes, vc.check_continuity, "no lesson provides"),
+        ("undeclared signature drift", mut_sigdrift, vc.check_continuity, "different signatures"),
+        ("old name after a rename", mut_stale_rename, vc.check_continuity, "still uses"),
     ]
     ok = True
     for name, mut, check, needle in fixtures:

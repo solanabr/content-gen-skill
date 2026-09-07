@@ -52,6 +52,13 @@ tool cannot see them).
 | Course opens with a motivate lesson that puts code in hands fast; closes with a conclusion | JUDGE (+ADVISORY in validator) | agent / human read |
 | Draft carries the scaled visual floor (max(2, ceil(words/600))), all PARSING; fences clean; no prose wall >700w; do-element in the first 300w (opener 150) | HARD | `validate_course.py drafts` |
 | Every lesson carries a research scaffold; verified claims cite a kit surface; artifact accretion edges run forward | HARD | `validate_course.py research` / `artifacts` |
+| No lesson OPENS a path no earlier lesson emits (and `course.starter_assets` does not ship) | HARD | `validate_course.py continuity` |
+| No lesson CONSUMES a symbol nothing earlier provides | HARD | `validate_course.py continuity` |
+| No symbol provided twice with different signatures unless `ledger.renames` declares it | HARD | `validate_course.py continuity` |
+| No lesson still uses a name after its declared `since_lesson` rename | HARD | `validate_course.py continuity` |
+| Every build lesson carries a `ledger`; `state_in` of N describes `state_out` of N−1 | ADVISORY | `validate_course.py continuity` |
+| Later code fences call each provided symbol with the shape it was given | ADVISORY | `tools/continuity.py scan` |
+| A declared rename's old name is gone from later code fences | ADVISORY | `tools/continuity.py renames` |
 | No corpus signature in briefs or drafts | HARD | blocklist grep (`corpus-signatures.txt`) |
 | Alt text could stand in for the visual; visual types show two kinds of thinking | JUDGE (+shape ADVISORY) | agent / human read |
 | Pace fits 2026 attention: payoff/empowerment beat every few paragraphs | JUDGE | agent / human read |
@@ -90,6 +97,12 @@ guest-only jobs) — the agent confirms or re-tags.
    (and again `--course <dir>` after emit). Every HARD must pass. This mechanizes
    the outcome⇄proof trace, the DAG walk, the ladder, the capstone-coverage, and
    the brief schema — don't re-do them by hand.
+1b. **Run the continuity scan over the drafts.**
+   `python3 ../tools/continuity.py check --course content/courses/<id> --infer`. Advisory by
+   design, so read it rather than waiting for it to fail: a hit means a later lesson calls a
+   helper with a shape no earlier lesson gave it, which is the one defect class an audit found
+   in **five of five** generated courses and no gate could see. `--infer` reads the drafts'
+   own function definitions, so it works on a course with no ledger authored yet.
 2. **Run the JUDGE items.** Read for the judgement rows above: is each `hook`
    felt, each `the_tradeoff` real, each `dominant_job` correct, one new element
    per lesson?

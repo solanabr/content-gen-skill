@@ -13,6 +13,8 @@ pass in references/quality-bar.md.
   ladder    artifact-rung monotonicity, difficulty band, cadence coverage
   capstone  capstone requires only skills taught earlier
   outcomes  every terminal outcome has a proof and vice-versa; module traces resolve
+  continuity  the reader's tree: nothing opened before it exists, no symbol that
+              changes shape mid-course, no old name surviving a declared rename
   all       run everything; exit 1 if any HARD fired
 
     python validate_course.py all     --course courses/<slug>
@@ -33,7 +35,8 @@ from course_lib import (
     BRIEF_CORE_KEYS, BRIEF_BUILD_KEYS, LESSON_KINDS, ID_RE, count_prose_emdashes,
     KIT_SURFACES, VISUAL_TYPES, VISUAL_FIELDS,
     WEAK_BLOOM_VERBS, PASSIVE_ASSESSMENT_RE, CHALLENGE_LANGS, CHALLENGE_BUILD_TYPES,
-    load_manifest, flatten_lessons, topo_sort,
+    SYMBOL_KINDS, SYMBOL_RE, LEDGER_LEGACY_KEYS,
+    load_manifest, flatten_lessons, topo_sort, course_ledgers,
 )
 
 HARD = "[HARD] "
@@ -784,15 +787,20 @@ def check_research(m: dict) -> dict:
 
 def check_artifacts(m: dict) -> dict:
     """The accretion graph: 'the toolkit becomes the bot' as a checkable DAG.
-    Structured artifact edges are optional; once any lesson declares one, edges must
-    run forward and non-terminal artifacts should be consumed downstream."""
+
+    This is a VIEW over the continuity ledger, not a second system: it reads the
+    `artifact:`-kind symbols out of `course_ledgers(m)`, which is where
+    `brief.artifact.{id,consumes}` and `brief.ledger.{provides,consumes}` both land.
+    One graph means a course can declare its ladder in either shape (or both) and
+    the two checks can never disagree about what was built when."""
     flags: list[str] = []
-    flat = flatten_lessons(m)
+    leds = course_ledgers(m)
     declared = []
-    for i, l in enumerate(flat):
-        art = l.get("brief", {}).get("artifact")
-        if isinstance(art, dict) and art.get("id"):
-            declared.append((art["id"], l["id"], i, art.get("consumes") or [], art.get("terminal")))
+    for i, led in enumerate(leds):
+        for p in led["provides"]:
+            if p["kind"] == "artifact":
+                cons = [c["name"] for c in led["consumes"] if c["kind"] == "artifact"]
+                declared.append((p["name"], led["lesson"], i, cons, p["terminal"]))
     if not declared:
         return _result("artifacts", ["ok: no structured artifact graph (prose artifact_spec only)"])
     pos = {}
@@ -816,6 +824,218 @@ def check_artifacts(m: dict) -> dict:
             flags.append(f"{ADV}artifact '{aid}' ({lid}) is consumed by nothing downstream — wire it "
                          f"in or flag terminal: <reason> ('the toolkit becomes the bot')")
     return _result("artifacts", flags)
+
+
+# ── continuity ─────────────────────────────────────────────────────────────────
+
+_STOP = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "at", "is", "are", "was",
+         "with", "that", "this", "it", "its", "for", "from", "you", "your", "has", "have",
+         "one", "two", "but", "not", "now", "still", "only", "just", "already", "plus",
+         "com", "para", "que", "uma", "seu", "sua", "dos", "das", "por", "como", "mas"}
+
+
+def _tokens(s: str) -> set:
+    return {t for t in re.split(r"[^a-z0-9_./-]+", s.lower()) if len(t) >= 3 and t not in _STOP}
+
+
+def _norm_path(p: str) -> str:
+    p = str(p).strip().strip("`").replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    return p.rstrip("/")
+
+
+def _path_covered(p: str, emitted: set) -> bool:
+    """Is `p` satisfied by something already in the reader's tree?
+
+    Directory-tolerant in BOTH directions on purpose: `cd toolkit/vault` is covered by
+    an earlier `emits: toolkit/vault/Anchor.toml`, and `opens: src/lib.rs` is covered by
+    an earlier `emits: src/`. Being generous here costs a missed flag; being strict
+    would manufacture a HARD failure on every correctly-built course that named a
+    directory instead of a file."""
+    if p in emitted:
+        return True
+    return any(e.startswith(p + "/") or p.startswith(e + "/") for e in emitted)
+
+
+def _rename_key(s: str) -> tuple:
+    """(kind_or_None, name) for a rename side. The kind prefix is optional here --
+    a rename reads naturally as `init_vault -> initialize`, and forcing `fn:` on both
+    sides buys nothing the name alone does not already identify."""
+    s = str(s or "").strip()
+    m = SYMBOL_RE.match(s)
+    if m and m.group(1) in SYMBOL_KINDS:
+        return (m.group(1), m.group(2).strip())
+    return (None, s)
+
+
+def _matches_rename(sym: dict, key: tuple) -> bool:
+    kind, name = key
+    return sym["name"] == name and (kind is None or sym["kind"] == kind)
+
+
+def check_continuity(m: dict) -> dict:
+    """The continuity gate: a lesson may not open on an artifact no earlier lesson
+    produced, and a symbol may not change shape behind the reader's back.
+
+    Every rule here is MANIFEST-ONLY -- it reads the declared ledger and nothing else.
+    The rules that need the tree (do the paths exist? does later verbatim code still
+    call the old name?) live in `continuity.py`, which is advisory.
+
+    CALIBRATION. A missing ledger is ADVISORY, never HARD. The ledger is new; ten real
+    courses predate it, and a gate that fails all ten on its first run is one people
+    learn to bypass rather than one they fix. What IS hard is a ledger that contradicts
+    itself -- because every defect this gate was built for (four lessons opening on
+    scaffolds the course never ships, a helper that grew an argument mid-course, a
+    capstone requiring a pool nobody created) is a contradiction, not an omission, the
+    moment the lesson says out loud what it expects to find."""
+    flags: list[str] = []
+    leds = course_ledgers(m)
+    if not leds:
+        return _result("continuity", ["ok: no lessons"])
+    lesson_at = {led["lesson"]: i for i, led in enumerate(leds)}
+    starter = {_norm_path(p) for p in (m.get("course", {}).get("starter_assets") or [])}
+
+    # 0. malformed declarations. A typo'd kind silently disables every rule below it,
+    #    so it is HARD rather than a quiet drop ("ids are contracts").
+    for led in leds:
+        for e in led["provides"] + led["consumes"]:
+            if e["error"]:
+                flags.append(f"{HARD}lesson {led['lesson']} ledger: {e['error']}")
+        for k in led["legacy"]:
+            flags.append(f"{ADV}lesson {led['lesson']} carries '{k}' — documented in "
+                         f"references/output-contract.md but never implemented; it is now "
+                         f"{LEDGER_LEGACY_KEYS[k]}")
+
+    declared_any = any(l["declared"] for l in leds)
+
+    # 1. renames: resolve the lesson, then forbid the old name at/after it.
+    renames = []          # (from_key, to_key, since_index, declaring_lesson)
+    for led in leds:
+        for r in led["renames"]:
+            frm, to = _rename_key(r.get("from")), _rename_key(r.get("to"))
+            since = r.get("since_lesson") or led["lesson"]
+            if not frm[1] or not to[1]:
+                flags.append(f"{HARD}lesson {led['lesson']} rename needs both from and to: {r!r}")
+                continue
+            if since not in lesson_at:
+                flags.append(f"{HARD}lesson {led['lesson']} rename since_lesson '{since}' "
+                             f"resolves to no lesson (typo?)")
+                continue
+            renames.append((frm, to, lesson_at[since], led["lesson"]))
+
+    for frm, to, since_i, at_lesson in renames:
+        if frm == to:
+            # from == to is a RE-SIGNATURE, not a rename: the name is unchanged and only
+            # its shape moved. It licenses the signature-drift rule below and nothing
+            # else -- forbidding the "old" name here would forbid the new one too.
+            continue
+        for j, led in enumerate(leds):
+            if j < since_i:
+                continue
+            for e in led["provides"] + led["consumes"]:
+                if _matches_rename(e, frm):
+                    flags.append(f"{HARD}lesson {led['lesson']} still uses '{e['symbol']}' after it "
+                                 f"was renamed to '{to[1]}' at {leds[since_i]['lesson']} "
+                                 f"(declared in {at_lesson}) — later code must use the new name")
+        if not any(_matches_rename(e, to)
+                   for led in leds[since_i:] for e in led["provides"]):
+            flags.append(f"{ADV}rename '{frm[1]}' -> '{to[1]}' (from {at_lesson}): nothing provides "
+                         f"the new name at or after {leds[since_i]['lesson']}")
+
+    # 2. symbols: consumed must be provided EARLIER.
+    provided_at: dict[str, list[tuple[int, dict]]] = {}
+    for i, led in enumerate(leds):
+        for p in led["provides"]:
+            if p["error"]:
+                continue
+            provided_at.setdefault(p["symbol"], []).append((i, p))
+
+    consumed_syms: set = set()
+    for i, led in enumerate(leds):
+        for c in led["consumes"]:
+            # `artifact:` edges are check_artifacts' half of this same graph. One graph,
+            # two views, and each flag printed exactly once.
+            if c["error"] or c["kind"] == "artifact":
+                continue
+            where = provided_at.get(c["symbol"])
+            if not where:
+                flags.append(f"{HARD}lesson {led['lesson']} consumes '{c['symbol']}' that no lesson "
+                             f"provides — the reader is asked to use something the course never built")
+            elif min(w[0] for w in where) >= i:
+                first = leds[min(w[0] for w in where)]["lesson"]
+                flags.append(f"{HARD}lesson {led['lesson']} consumes '{c['symbol']}' first provided "
+                             f"in {first}, which comes later — continuity runs forward only")
+            else:
+                consumed_syms.add(c["symbol"])
+
+    # 3. signature drift: the same name, two shapes, nobody told the reader.
+    renamed_names = {k[1] for r in renames for k in (r[0], r[1])}
+    for sym, where in provided_at.items():
+        if sym.startswith("artifact:"):
+            continue                                  # check_artifacts owns duplicate rungs
+        spans = {(p["lo"], p["hi"]) for _i, p in where if p["lo"] is not None}
+        if len(spans) > 1 and sym.split(":", 1)[-1] not in renamed_names:
+            lessons = ", ".join(leds[i]["lesson"] for i, _p in where)
+            flags.append(f"{HARD}'{sym}' is provided with {len(spans)} different signatures "
+                         f"({sorted(spans)}) across {lessons} — a symbol that changes shape "
+                         f"mid-course needs a renames: entry, or the later call sites break")
+        elif len(where) > 1 and len(spans) <= 1:
+            flags.append(f"{ADV}'{sym}' is provided by {len(where)} lessons "
+                         f"({', '.join(leds[i]['lesson'] for i, _p in where)}) — provide once, "
+                         f"consume after")
+
+    # 4. paths: a lesson may only OPEN what already exists.
+    emitted: set = set()
+    for i, led in enumerate(leds):
+        own_emits = {_norm_path(p) for p in led["emits"]}
+        own_emits |= {_norm_path(p["name"]) for p in led["provides"] if p["kind"] == "file"}
+        opens = [_norm_path(p) for p in led["opens"]]
+        opens += [_norm_path(c["name"]) for c in led["consumes"] if c["kind"] == "file"]
+        for p in opens:
+            if p in own_emits:
+                flags.append(f"{HARD}lesson {led['lesson']} opens '{p}' and also emits it — the reader "
+                             f"is told to run a file this lesson has not written yet. Ship it in "
+                             f"course.starter_assets, or open on the previous lesson's artifact")
+            elif not _path_covered(p, emitted | starter):
+                flags.append(f"{HARD}lesson {led['lesson']} opens '{p}', which no earlier lesson emits "
+                             f"and course.starter_assets does not ship")
+        emitted |= own_emits
+
+    # 5. ADVISORY: a rung nothing downstream picks up.
+    last = len(leds) - 1
+    for i, led in enumerate(leds):
+        for p in led["provides"]:
+            if p["error"] or p["kind"] == "artifact":
+                continue   # artifact rungs are check_artifacts' half of the same graph
+            if p["symbol"] not in consumed_syms and not p["terminal"] and i < last:
+                flags.append(f"{ADV}'{p['symbol']}' ({led['lesson']}) is consumed by nothing "
+                             f"downstream — wire it in, or mark it terminal: <reason>")
+
+    # 6. ADVISORY: the prose seam. state_in of N should describe state_out of N-1.
+    for i in range(1, len(leds)):
+        a, b = leds[i - 1]["state_out"], leds[i]["state_in"]
+        if not a or not b:
+            continue
+        ta, tb = _tokens(a), _tokens(b)
+        if not ta or not tb:
+            continue
+        overlap = len(ta & tb) / min(len(ta), len(tb))
+        if overlap < 0.2:
+            flags.append(f"{ADV}lesson {leds[i]['lesson']} state_in shares {overlap:.0%} of its "
+                         f"vocabulary with {leds[i-1]['lesson']} state_out — one of the two is "
+                         f"describing a tree the other did not leave behind")
+
+    # 7. coverage. ADVISORY by design; see the docstring.
+    missing = [l["lesson"] for l in leds if l["kind"] == "build" and not l["declared"]]
+    if missing and declared_any:
+        flags.append(f"{ADV}{len(missing)}/{len(leds)} build lesson(s) carry no ledger: "
+                     f"{', '.join(missing[:6])}{' …' if len(missing) > 6 else ''} — the gate can "
+                     f"only check what a lesson declares")
+    elif missing:
+        return _result("continuity", flags + [f"ok: no continuity ledger declared "
+                                              f"({len(missing)} build lesson(s) undeclared)"])
+    return _result("continuity", flags)
 
 
 def check_challenges(course_dir, m: dict | None = None) -> dict:
@@ -865,7 +1085,8 @@ def check_challenges(course_dir, m: dict | None = None) -> dict:
 
 CHECKS = {"dag": check_dag, "briefs": check_briefs, "quiz": check_quiz, "ladder": check_ladder,
           "capstone": check_capstone, "outcomes": check_outcomes,
-          "research": check_research, "artifacts": check_artifacts, "length": check_length}
+          "research": check_research, "artifacts": check_artifacts,
+          "continuity": check_continuity, "length": check_length}
 
 
 # ── runner ──────────────────────────────────────────────────────────────────────
@@ -1088,6 +1309,109 @@ def selftest() -> int:
     ag["lessons"][0]["brief"]["artifact"] = {"id": "tool-a", "consumes": []}
     ag["lessons"][1]["brief"]["artifact"] = {"id": "tool-b", "consumes": ["tool-a"]}
     check(not check_artifacts(ag)["hard"], "forward accretion graph -> artifacts clean")
+
+    # ── continuity ────────────────────────────────────────────────────────────
+    def _cont(a: dict | None = None, b: dict | None = None, course: dict | None = None):
+        g = _good_manifest()
+        if a is not None:
+            g["lessons"][0]["brief"]["ledger"] = a
+        if b is not None:
+            g["lessons"][1]["brief"]["ledger"] = b
+        if course:
+            g["course"].update(course)
+        return check_continuity(g)
+
+    # calibration: no ledger anywhere is never HARD -- ten real courses predate it
+    check(not check_continuity(_good_manifest())["hard"],
+          "no ledger declared -> continuity is not HARD (calibration)")
+    check(any("no continuity ledger" in f for f in check_continuity(_good_manifest())["flags"]),
+          "no ledger declared -> says so rather than claiming clean")
+
+    # a lesson consuming a symbol nothing provides
+    r = _cont(None, {"consumes": ["fn:derive_vault_pda"]})
+    check(r["hard"] and any("no lesson provides" in f for f in r["flags"]),
+          "consumes a symbol nobody provides -> continuity HARD")
+    # provided EARLIER is fine; provided LATER is not
+    check(not _cont({"provides": ["fn:derive_vault_pda"]},
+                    {"consumes": ["fn:derive_vault_pda"]})["hard"],
+          "consumes a symbol provided earlier -> clean")
+    r = _cont({"consumes": ["fn:derive_vault_pda"]}, {"provides": ["fn:derive_vault_pda"]})
+    check(r["hard"] and any("comes later" in f for f in r["flags"]),
+          "consumes a symbol provided later -> continuity HARD")
+
+    # opening a file no earlier lesson emits, and the starter-asset escape hatch
+    r = _cont(None, {"opens": ["swap.js"]})
+    check(r["hard"] and any("no earlier lesson emits" in f for f in r["flags"]),
+          "opens a path nobody emits -> continuity HARD (the swap.js defect)")
+    check(not _cont({"emits": ["swap.js"]}, {"opens": ["swap.js"]})["hard"],
+          "opens a path an earlier lesson emits -> clean")
+    check(not _cont(None, {"opens": ["swap.js"]}, {"starter_assets": ["swap.js"]})["hard"],
+          "opens a declared course starter asset -> clean")
+    check(not _cont({"emits": ["toolkit/vault/Anchor.toml"]}, {"opens": ["toolkit/vault"]})["hard"],
+          "opens a directory an earlier lesson emitted into -> clean")
+    r = _cont(None, {"opens": ["bot/main.py"], "emits": ["bot/main.py"]})
+    check(r["hard"] and any("and also emits it" in f for f in r["flags"]),
+          "told to run a file this same lesson writes -> continuity HARD")
+
+    # signature drift with no rename declared
+    r = _cont({"provides": [{"symbol": "fn:mint", "sig": "(a, b)"}]},
+              {"provides": [{"symbol": "fn:mint", "sig": "(a, b, c)"}]})
+    check(r["hard"] and any("different signatures" in f for f in r["flags"]),
+          "same symbol, two signatures, no rename -> continuity HARD")
+    r = _cont({"provides": [{"symbol": "fn:mint", "sig": "(a, b)"}]},
+              {"provides": [{"symbol": "fn:mint", "sig": "(a, b, c)"}],
+               "renames": [{"from": "fn:mint", "to": "fn:mint", "since_lesson": "pda-state"}]})
+    check(not r["hard"], "a declared rename licenses the signature change")
+
+    # the old name surviving a declared rename
+    r = _cont({"provides": ["fn:init_vault"]},
+              {"provides": ["fn:initialize"], "consumes": ["fn:init_vault"],
+               "renames": [{"from": "fn:init_vault", "to": "fn:initialize",
+                            "since_lesson": "pda-state"}]})
+    check(r["hard"] and any("still uses" in f for f in r["flags"]),
+          "old name used after a declared rename -> continuity HARD")
+    r = _cont(None, {"renames": [{"from": "a", "to": "b", "since_lesson": "nope"}]})
+    check(r["hard"] and any("resolves to no lesson" in f for f in r["flags"]),
+          "rename since_lesson typo -> continuity HARD")
+
+    # malformed declarations are HARD, not a silent hole
+    r = _cont({"provides": ["derive_vault_pda"]})
+    check(r["hard"] and any("<kind>:<name>" in f for f in r["flags"]),
+          "a symbol with no kind prefix -> continuity HARD")
+    r = _cont({"provides": ["func:x"]})
+    check(r["hard"] and any("unknown symbol kind" in f for f in r["flags"]),
+          "an unknown symbol kind -> continuity HARD")
+
+    # advisories
+    r = _cont({"provides": ["fn:helper"]}, {"provides": ["fn:other"]})
+    check(not r["hard"] and any("consumed by nothing downstream" in f for f in r["flags"]),
+          "a provides nobody consumes -> advisory")
+    r = _cont({"state_out": "a counter program that builds and passes its tests"},
+              {"state_in": "an empty directory, nothing written yet"})
+    check(not r["hard"] and any("state_in shares" in f for f in r["flags"]),
+          "state_in that does not describe the previous state_out -> advisory")
+    r = _cont({"state_out": "a counter program that builds and passes its tests"},
+              {"state_in": "the counter program from the previous lesson, tests passing"})
+    check(not any("state_in shares" in f for f in r["flags"]),
+          "an honest state_in seam -> no advisory")
+
+    # the three fields output-contract.md documented and nothing ever implemented
+    lg = _good_manifest()
+    lg["lessons"][0]["brief"]["carry_forward"] = "the counter"
+    r = check_continuity(lg)
+    check(not r["hard"] and any("never implemented" in f for f in r["flags"]),
+          "a brief written against the old output-contract fields is told where they went")
+
+    # ONE graph: an artifact edge and a ledger edge are the same graph
+    og = _good_manifest()
+    og["lessons"][0]["brief"]["artifact"] = {"id": "counter", "consumes": []}
+    og["lessons"][1]["brief"]["ledger"] = {"consumes": ["artifact:counter"],
+                                           "provides": ["artifact:vault"]}
+    check(not check_artifacts(og)["hard"] and not check_continuity(og)["hard"],
+          "a ledger consuming an artifact declared the legacy way resolves (one graph)")
+    og["lessons"][1]["brief"]["ledger"]["consumes"] = ["artifact:ghost"]
+    check(check_artifacts(og)["hard"],
+          "a ledger consuming an unknown artifact is caught by check_artifacts")
 
     # corpus signature in a brief
     cg = _good_manifest()

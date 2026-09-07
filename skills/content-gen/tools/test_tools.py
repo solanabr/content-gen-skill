@@ -40,6 +40,7 @@ REGISTERED = [
     "course_lib",
     "pin_refresh",
     "validate_course",
+    "continuity",             # branch: feat/continuity-gate
     "scaffold_course",
     "verify_code",
     "verify_blocks",

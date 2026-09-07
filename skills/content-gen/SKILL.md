@@ -97,7 +97,11 @@ whether it MUST ground against live sources.
 12. **Write the lessons.** Work `content/courses/<id>/queue/NEXT.md` through the voice seam
     (Scope & deliverable above), one lesson at a time; run the visual pass on each
     draft; update `_state.yaml`. In `brief-only` mode, stop after the handoff
-    packet and note the human accuracy gate.
+    packet and note the human accuracy gate. Once the drafts exist, run the continuity
+    scan over them — it is advisory, so it must be READ, not waited on:
+    ```bash
+    python3 "$SKILL/tools/continuity.py" check --course content/courses/<id> --infer
+    ```
 13. **Interactive plugins + Academy publish.** Author per-lesson `quiz_blocks` and (Rust/TS lessons)
     `coding_challenges` in the manifest briefs (lesson-brief-schema §H). **Do not think about option
     order — a tool assigns it; hand-ordering is a gate failure.** Write each question's options in
@@ -161,10 +165,20 @@ python3 "$SKILL/tools/scaffold_course.py" emit --manifest m.json --out content/c
 ```
 
 - `tools/validate_course.py` — `dag | briefs | quiz | ladder | capstone | outcomes | research |
-  artifacts | length | drafts | challenges | all` (`drafts` HARD-enforces the scaled visuals floor;
-  `quiz` is the whole-course quiz gate). HARD = breaks the DAG walk or the writer handoff;
-  ADVISORY = a smell to weigh. A statistical metric under its sample floor says
+  artifacts | continuity | length | drafts | challenges | all` (`drafts` HARD-enforces the scaled
+  visuals floor; `quiz` is the whole-course quiz gate). HARD = breaks the DAG walk or the writer
+  handoff; ADVISORY = a smell to weigh. A statistical metric under its sample floor says
   **INCONCLUSIVE, not passed**, and never green-lights a course by staying quiet.
+- `tools/continuity.py` — the half of the continuity gate that needs the **tree**:
+  `check | scan | renames | paths | infer | dry-run`. `validate_course.py continuity` proves the
+  declared ledger is self-consistent; this proves it against the drafts a reader will read. Its
+  headline is the **call-site scan** — for each provided symbol, the real call sites in later
+  lessons, flagged when their shape disagrees with the declared signature. It is what catches the
+  helper that grew an argument at m02-l2 while two later labs kept calling it with the old one.
+  **Everything it emits is ADVISORY**, and `--infer` makes it work on a course with no ledger
+  authored yet by reading the drafts' own function definitions. Shaken down across the ten courses
+  in `content/courses/`: 4 of 9 scannable courses fire, 16 hits over 113 inspected call sites, no
+  mis-parses — see the header for the fence-scoping discipline that got it there.
 - `tools/scaffold_course.py` — `emit` (idempotent; `--force`), `check` (dry-run). Honors
   human edits via `course.lock.json` hash drift.
 - `tools/assemble_manifest.py` — the other half of the brief fan-out: `scaffold_course.py` splits a

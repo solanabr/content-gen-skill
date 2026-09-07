@@ -75,7 +75,10 @@ join key across the four dirs and a human sort order; the stable handle is the
     "routing": { "backbone_pattern": ["map-from-known","challenge-ladder"],   // ordered phases of the ONE backbone track; guests go in guest_patterns
                  "lesson_template": "overview-lab-challenge",
                  "guest_patterns": ["build-it-twice"], "security": "inline-footguns" },
-    "artifact_ladder": ["hello-world","counter","pda-app","cpi-composition","capstone"]
+    "artifact_ladder": ["hello-world","counter","pda-app","cpi-composition","capstone"],
+    "starter_assets": ["assets/swap-starter/swap.js"]   // OPTIONAL: scaffolds the COURSE ships,
+    // so a lesson may legitimately `ledger.opens` them before any lesson emits them. Anything a
+    // lesson opens that is neither here nor emitted earlier is a `continuity` HARD failure.
   },
 
   "dag": {
@@ -117,11 +120,24 @@ Verbatim `../lesson-brief-schema.md` §C; emitted under a top-level `lesson:` ke
 HARD-fails if absent): `id, title, objectives[{bloom,statement}], prerequisites,
 hook, concept_spec, artifact_spec, exercise_spec, the_tradeoff,
 just_in_time{define,footguns}, assessment, difficulty, fading, dominant_job`.
-Optional but recommended: `voice_notes, est_length`, and the cross-lesson
-consistency fields `artifact_state_in`, `artifact_state_out`, `carry_forward`.
+Optional but recommended: `voice_notes, est_length`.
 `dominant_job ∈ {show-how, derive-why, demystify, economics, frame, sustain,
 motivate}` — `frame`/`demystify` are guest-only jobs (advisory if used as a
 whole-lesson backbone).
+
+Cross-lesson consistency is the `ledger` block (`../lesson-brief-schema.md` §C/§I),
+REQUIRED on `kind: build` lessons and checked by `validate_course.py continuity`:
+`ledger.{state_in, state_out, opens, emits, provides, consumes, renames}`.
+
+> **Correction, 2026-09-07.** This section previously named three fields here —
+> `artifact_state_in`, `artifact_state_out`, `carry_forward` — as "optional but
+> recommended". They appeared in **no Python file in the skill** for the tool's entire
+> life: documented, authorable, and validated by nothing. The first two are now
+> `ledger.state_in` / `ledger.state_out`; `carry_forward` is subsumed by
+> `ledger.provides` + `ledger.emits`, which enumerate what carries forward instead of
+> narrating it — the whole reason the original field could never be checked. A brief
+> that still carries an old name gets a `continuity` ADVISORY telling it where the field
+> went, rather than being silently ignored a second time.
 
 ### Research scaffold (`lesson.research`) — optional, NEW
 ```jsonc

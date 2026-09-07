@@ -66,7 +66,15 @@ lesson:
   hook:                  # the FELT problem / exploit / demo that opens it  → feeds voice pain-first opener
   concept_spec:          # the idea(s) to teach + the worked example to build (one new element per pass)
   artifact_spec:         # exactly what the learner builds this lesson (the ladder rung / accretion)
-  artifact:              # OPTIONAL structured accretion edge: {id, consumes: [earlier artifact ids], terminal: <reason>}
+  artifact:              # DERIVED VIEW of `ledger` below: {id, consumes: [earlier artifact ids], terminal: <reason>}
+  ledger:                # REQUIRED for kind: build — the continuity contract (see §I)
+    state_in:            #   one honest line: what is in the reader's tree as this lesson OPENS
+    state_out:           #   one honest line: what is in it when the lesson CLOSES
+    opens: []            #   course-relative paths this lesson tells the reader to open. MUST ALREADY EXIST.
+    emits: []            #   course-relative paths this lesson creates
+    provides: []         #   symbols defined here: "fn:derive_vault_pda" | {symbol:, sig: "(a, b)", terminal: <reason>}
+    consumes: []         #   symbols from EARLIER lessons this lesson uses
+    renames: []          #   [{from, to, since_lesson}] — from == to declares a SIGNATURE change
   verify:                # RECOMMENDED for build lessons: {command, expect} — the one-line paste-and-see proof (CI smoke tier)
   exercise_spec:         # the completion problem + the unguided challenge + acceptance criteria
   the_tradeoff:          # the cost / limit / "when not to use it"  → feeds voice always-name-the-tradeoff
@@ -269,3 +277,94 @@ publishable Academy course; `tools/validate_course.py` validates the specs (`che
   <challenge-id>/` (starter/solution + tests.json); the brief only points at them. Three test modes exist —
   TS (boolean expression over `result = fn(input)`), Rust `standard` (value compare), and Rust `buildable`
   (compiles ⇒ pass, enforced by a hidden `mod verify` harness). See `references/academy-schema.md`.
+
+---
+
+## I. The continuity ledger (`lesson.ledger`) — what the reader's tree actually holds
+
+An independent audit of five courses this skill generated found the same defect in **every
+one of them**: a later lesson presumes an artifact the earlier lessons never produced, or
+produced under a different name. Four lessons in one course open on starter scaffolds the
+course never ships (`swap.js`, `toolkit/vault`, `bot/`, `opsbot.py`). A payments course
+claims a gasless path "lives inside the txreq app already"; it was never mounted. One course
+renames `init_vault` to `initialize` mid-way and later verbatim code keeps calling the old
+name. Another grows a helper from 2 arguments to 3 at `m02-l2`, and two later labs still call
+it with 2 — both crash before any transaction reaches the network.
+
+Every one was found by a human reading the course end to end. **None was catchable by any
+check this skill shipped**, because `artifact_spec` is prose and prose is not a graph.
+
+The ledger is that graph. It is REQUIRED on `kind: build` lessons.
+
+### The fields
+
+| field | what it holds | what it stops |
+|---|---|---|
+| `state_in` | one honest line: what is in the reader's tree as the lesson OPENS | a `flow.recap` that invents a prior experience |
+| `state_out` | the same line for the close | the next lesson's `state_in` disagreeing with it |
+| `opens` | course-relative paths this lesson tells the reader to open — **they must already exist** | `cd toolkit/vault` on a scaffold nobody shipped |
+| `emits` | course-relative paths this lesson creates | the same, from the other side |
+| `provides` | symbols defined here | a capstone that needs a pool no lesson creates |
+| `consumes` | symbols from EARLIER lessons used here | using a helper before it is written |
+| `renames` | `[{from, to, since_lesson}]` | later code that kept the old name |
+
+**`opens` means MUST-ALREADY-EXIST.** That is the whole distinction from `emits`, and it is
+what makes the check possible: a lesson listing the same path in both is telling the reader
+to run a file it has not written yet, which is a HARD failure. If the course genuinely ships
+the scaffold, declare it in `course.starter_assets` and the check passes.
+
+### Symbol grammar
+
+Every symbol is `<kind>:<name>`, from a closed set — an unrecognized kind is a HARD failure,
+because a typo'd kind silently disables every rule that depends on it:
+
+```
+fn:derive_vault_pda      type:VaultConfig     const:VAULT_SEED     ix:initialize
+cmd:npm run mint         file:scripts/mint.ts env:HELIUS_API_KEY   account:vault-pda
+artifact:anchor-vault    ← the bridge kind; see below
+```
+
+A `provides` entry may be a bare string or a dict carrying the signature:
+
+```yaml
+provides:
+  - fn:derive_vault_pda                                    # no signature declared
+  - {symbol: "fn:mint", sig: "(conn, payer, amount)"}      # arity 3
+  - {symbol: "fn:send", sig: "(payer, ixs, opts = {})"}    # arity 2..3 — a default widens the span
+  - {symbol: "fn:teardown", terminal: "debug aid; nothing downstream needs it"}
+```
+
+Declare `sig` wherever a later lesson calls the symbol. It is what lets
+`tools/continuity.py scan` compare real call sites against the shape you promised.
+
+### Renames, and the same-name signature change
+
+```yaml
+renames:
+  - {from: "fn:init_vault", to: "fn:initialize", since_lesson: m03-l2}
+  - {from: "fn:resolveAta", to: "fn:resolveAta", since_lesson: m02-l2}   # same name, new shape
+```
+
+`from == to` declares a **re-signature**: the name did not move, only its arguments did. It
+licenses the signature-drift rule and nothing else. Any lesson at or after `since_lesson`
+that still declares the OLD name is a HARD failure.
+
+### `artifact` is a VIEW over this, not a second system
+
+`brief.artifact.{id, consumes}` is read as `artifact:<id>` in the same graph, so the accretion
+ladder and the symbol ledger are one DAG. A course may declare its rungs in either shape (or
+both) and the two checks can never disagree about what was built when.
+`validate_course.py artifacts` owns the `artifact:` edges; `validate_course.py continuity`
+owns everything else, so each flag is printed exactly once.
+
+### What checks it
+
+- **`validate_course.py continuity`** — manifest-only, HARD, in `CHECKS` (so `all` and CI
+  tier 1 pick it up). A *missing* ledger is ADVISORY, never HARD: the ledger is new, ten real
+  courses predate it, and a gate that fails all ten on its first run is one people learn to
+  bypass. What is HARD is a ledger that **contradicts itself** — which every defect above
+  becomes, the moment the lesson says out loud what it expects to find.
+- **`tools/continuity.py`** — the half that needs the tree: shipped-path existence, the
+  rename scan over later code fences, and the call-site scan. **All advisory.** See that
+  file's header for the fence-scoping discipline it is written under
+  (`method/known-failure-modes.md` §1).
