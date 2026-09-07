@@ -832,14 +832,35 @@ def check_research(m: dict) -> dict:
     lesson was written from the model's memory and nobody recorded where anything
     came from", which is the same class of defect as an unrunnable code block: it
     ships, it reads fine, and it is wrong. Grounding is mandatory (SKILL.md step 9,
-    quality-bar.md §5), so the gate now says so."""
+    quality-bar.md §5), so the gate now says so.
+
+    But it says so PROPORTIONATELY. A blanket HARD on the missing case red-lined
+    every course written before the requirement existed, including the skill's own
+    bundled examples, and a permanently-red check is one people learn to pass with
+    `|| true`. Only 20 of 223 research files in the corpus carry claims at all and
+    8 of 10 courses declare none, so a blanket HARD fails the corpus instead of
+    improving it -- the same Goodhart trap the quiz rotation came from.
+
+    Severity therefore keys off whether the COURSE adopted scaffolds at all. Some
+    lessons grounded and others not is a real gap: HARD. None at all predates the
+    requirement: one advisory naming the set. A new course inherits HARD the moment
+    its first scaffold lands, which is what the promotion was actually reaching for."""
     flags: list[str] = []
-    for l in m.get("lessons", []):
+    lessons = m.get("lessons", [])
+    adopted = any(l.get("research") for l in lessons)
+    missing = [l.get("id", "?") for l in lessons if not l.get("research")]
+    if missing and not adopted:
+        flags.append(f"research scaffolds absent course-wide ({len(missing)} lesson(s)) — this "
+                     f"course predates SKILL.md step 9; ground it on the next content pass "
+                     f"(references/research-grounding.md)")
+    for l in lessons:
         lid = l.get("id", "?")
         r = l.get("research")
         if not r:
-            flags.append(f"{HARD}lesson {lid} has no research scaffold — SKILL.md step 9 is "
-                         f"per-lesson and grounding is mandatory (references/research-grounding.md)")
+            if adopted:
+                flags.append(f"{HARD}lesson {lid} has no research scaffold while sibling lessons "
+                             f"in this course do — grounding is per-lesson, not per-course "
+                             f"(references/research-grounding.md)")
             continue
         for c in r.get("claims", []):
             surf = str(c.get("mcp", ""))
@@ -1506,10 +1527,18 @@ def selftest() -> int:
         check(any("prose wall" in f for f in check_drafts(td)["flags"]),
               "700+ word prose wall -> drafts HARD")
 
-    # research: a missing scaffold is HARD (promoted 2026-09-07 — grounding is mandatory)
+    # research: severity keys off whether the course adopted scaffolds at all.
+    # None anywhere = predates the requirement, advisory. Some but not all = a real
+    # gap, HARD. Both cases must be asserted or the proportionality silently rots
+    # back into the blanket HARD that red-lined every legacy course.
     rg = _good_manifest()
-    check(any("no research scaffold" in f for f in check_research(rg)["flags"])
-          and check_research(rg)["hard"], "lesson with no research scaffold -> research HARD")
+    check(any("absent course-wide" in f for f in check_research(rg)["flags"])
+          and not check_research(rg)["hard"],
+          "no scaffold anywhere -> research advisory, not HARD")
+    rg["lessons"][0]["research"] = {"claims": []}
+    check(any("while sibling lessons" in f for f in check_research(rg)["flags"])
+          and check_research(rg)["hard"],
+          "partially scaffolded course -> research HARD on the gaps")
     for _l in rg["lessons"]:
         _l["research"] = {"claims": []}
     check(not check_research(rg)["hard"], "every lesson scaffolded -> research clean")
