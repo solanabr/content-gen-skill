@@ -42,6 +42,9 @@ content/courses/<course-id>/
 │   ├── facts/<mNN-lN-id>.facts.md         # frozen facts, one/line → writer-style's facts-diff gate
 │   └── drafts/                            # writer OUTPUT lands here → writer-style's audit gate
 ├── queue/NEXT.md          # the ready-to-write packet for the next unblocked lesson
+├── fixes/<fix-id>.yaml    # OPTIONAL, written by tools/fix_sweep.py: one open correction and every
+│                          # surface carrying the claim. `status: open` is HARD in validate_course.py
+│                          # fixes, so no course exports mid-sweep (method/fix-protocol.md)
 └── assets/                # optional starter scaffolds / diagrams
 ```
 

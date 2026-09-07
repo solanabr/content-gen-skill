@@ -54,6 +54,7 @@ REGISTERED = [
     "quiz_layout",           # branch: fix/quiz-path-hardening
     "quiz_balance",          # pre-rename name; drop this line once quiz_edit lands
     "dedash",
+    "fix_sweep",             # branch: feat/fix-protocol
     "ci",
 ]
 

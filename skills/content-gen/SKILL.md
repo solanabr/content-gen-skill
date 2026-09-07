@@ -178,9 +178,10 @@ python3 "$SKILL/tools/scaffold_course.py" emit --manifest m.json --out content/c
 ```
 
 - `tools/validate_course.py` — `dag | briefs | quiz | ladder | capstone | outcomes | research |
-  freshness | artifacts | continuity | length | drafts | challenges | all` (`drafts` HARD-enforces
-  the scaled visuals floor; `quiz` is the whole-course quiz gate). HARD = breaks the DAG walk or the
-  writer handoff; ADVISORY = a smell to weigh. A statistical metric under its sample floor says
+  freshness | artifacts | continuity | length | fixes | drafts | challenges | all` (`drafts`
+  HARD-enforces the scaled visuals floor; `quiz` is the whole-course quiz gate; `fixes` needs
+  `--course`). HARD = breaks the DAG walk or the writer handoff; ADVISORY = a smell to weigh.
+  A statistical metric under its sample floor says
   **INCONCLUSIVE, not passed**, and never green-lights a course by staying quiet.
 - `tools/continuity.py` — the half of the continuity gate that needs the **tree**:
   `check | scan | renames | paths | infer | dry-run`. `validate_course.py continuity` proves the
@@ -212,6 +213,16 @@ python3 "$SKILL/tools/scaffold_course.py" emit --manifest m.json --out content/c
   `quiz_blocks`, so a fan-out of editors does not race on one file. `merge` refuses any file whose
   block key, question id, option id, `correct` flag, `multiSelect` flag, or option ORDER moved —
   wording is the only thing an editor may change. Run it BEFORE `quiz_layout.py permute`.
+- `tools/fix_sweep.py` — `plan | check | close | list`: the executable half of
+  `method/fix-protocol.md`. **Never correct a shipped claim at the line you found it.**
+  `plan --claim "<text>"` lists every surface that carries it (draft prose and its twin two
+  lessons later, the ` ```visual ` spec a re-render rebuilds from, `alt:`, the `visual-src` HTML,
+  the brief, quiz feedback, challenge files, facts/research, the cover, the exported copy) and
+  writes `<course>/fixes/<id>.yaml`. Twins are found by **normalised code-fence hashing**, so a
+  snippet duplicated under rewritten comments is found by structure. `check` fails while any
+  surface still matches OR **any rendered image is older than its HTML source** — the machine-
+  checkable form of "the picture still teaches what the prose retracted". `validate_course.py
+  fixes` HARD-fails any sweep left `status: open`.
 - `tools/dedash.py` — strips em-dashes (the top AI tell) from drafts, deterministically:
   commas in prose/visual specs, hyphens in code comments, code/output fences protected.
   Run it as the final step of the writing pass; `validate_course.py drafts` HARD-fails
@@ -289,6 +300,7 @@ file only when you are doing that job.
 | `method/` | Covers |
 |---|---|
 | **`known-failure-modes.md`** | **Read first.** The failures that recur across waves — the substring-vs-real-usage law (a grep for a tool name flags "forgets" and "byte cast"), and **SKIP is not PASS**. |
+| **`fix-protocol.md`** | **Read before applying ANY correction to a shipped course.** The fifteen surfaces one claim lives on, and why fixing the filed line alone manufactured ~17% of the next audit's findings. |
 | `brief-fanout.md` | One agent per module writing lesson briefs, then `assemble_manifest.py` folding them back. |
 | `lesson-writing.md` | Working the queue one lesson at a time through the voice seam. |
 | `fact-recheck.md` | Re-verifying an expired claim: the TTL table and its evidence, how the stale list is dispatched, and the sweep rule (one correction, every site). |

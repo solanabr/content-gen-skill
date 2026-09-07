@@ -234,11 +234,33 @@ def _lesson_id(prefix: str, lid: str) -> str:
 
 
 def _skills_for(brief: dict, mod: dict, cfg: dict) -> list[str]:
-    """Map internal DAG skill nodes (module teaches/requires) to academy skills.yaml slugs
-    via cfg['skills_map']; fall back to default_skills. Deduped, order-stable."""
+    """A lesson's academy skill tags: the brief's own `skills:` when it has them, the
+    MODULE derivation only when it does not.
+
+    Why the order matters. This function used to read `mod["teaches_skills"]` plus the
+    brief's prerequisites and nothing else, so **every lesson in a module got a
+    byte-identical array by construction** — measured across the ten shipped courses,
+    all 79 modules. A round-2 audit filed that as a major: one 31-lesson course of mostly
+    Rust, TypeScript and Docker content credited Solana-specific skills on every lesson,
+    and its container lessons (installing Docker, writing a Dockerfile) were tagged with a
+    slug the learner reads as "Program Development". A module-level field cannot describe
+    a lesson, and the tag is learner-facing.
+
+    `brief["skills"]` (lesson-brief-schema §C) is the per-lesson answer. Entries map
+    through `cfg['skills_map']` like any DAG node; an entry that is already an academy
+    slug passes through, so a brief can name either vocabulary. Deduped, order-stable."""
     smap = cfg["skills_map"]
+    explicit = brief.get("skills")
+    if explicit:
+        out: list[str] = []
+        for n in explicit:
+            slug = smap.get(n, n)
+            if slug and slug not in out:
+                out.append(slug)
+        if out:
+            return out
     nodes = list(mod.get("teaches_skills", [])) + list(brief.get("prerequisites", []))
-    out: list[str] = []
+    out = []
     for n in nodes:
         slug = smap.get(n)
         if slug and slug not in out:
@@ -681,6 +703,26 @@ def selftest() -> int:
             "a stale claim living only in lessons/research/ still blocks the export")
         chk(stale_claims(man) == [],
             "…which manifest-only reading would have missed (why _stale_rows exists)")
+
+    # ── per-lesson skills beat the module derivation (the audit's tag major) ──
+    _cfg = {"skills_map": {"account-model": "account-model", "docker": "containers"},
+            "default_skills": ["solana-fundamentals"]}
+    _mod = {"teaches_skills": ["account-model"]}
+    chk(_skills_for({}, _mod, _cfg) == ["account-model"],
+        "no brief skills -> the module derivation still applies (back-compatible)")
+    chk(_skills_for({"skills": ["docker"]}, _mod, _cfg) == ["containers"],
+        "brief skills WIN over the module's teaches_skills, mapped through skills_map")
+    chk(_skills_for({"skills": ["typescript-basics"]}, _mod, _cfg) == ["typescript-basics"],
+        "an entry already in academy-slug vocabulary passes through unmapped")
+    chk(_skills_for({"skills": ["docker", "docker"]}, _mod, _cfg) == ["containers"],
+        "brief skills are deduped, order-stable")
+    chk(_skills_for({"skills": []}, _mod, _cfg) == ["account-model"],
+        "an EMPTY skills list is 'unset', not 'no skills' (the platform needs a non-empty tag)")
+    chk(_skills_for({}, {}, _cfg) == ["solana-fundamentals"],
+        "nothing to derive -> default_skills, unchanged")
+    chk(_skills_for({"skills": ["docker"]}, _mod, _cfg)
+        != _skills_for({"skills": ["account-model"]}, _mod, _cfg),
+        "two lessons in the SAME module can now differ — the whole point")
 
     print("\n" + ("ACADEMY_EXPORT SELFTESTS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1
