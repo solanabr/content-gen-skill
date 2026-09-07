@@ -9,18 +9,29 @@
 #   docker run --rm -v "$PWD":/work -w /work content-gen-verify \
 #       python3 skills/content-gen/tools/verify_code.py content/courses/<id> --env local --run-smoke
 #
-# Bump the ARG pins to match the content's declared toolchain when it moves. These
-# defaults track the btc-to-sol course's 2026 declarations.
+# DO NOT hand-edit the pins below. They are generated from ../references/pins.yaml:
+#
+#   python3 ../tools/pin_refresh.py render     # rewrite the block from pins.yaml
+#   python3 ../tools/pin_refresh.py check      # fail if it drifts, or if pins.yaml is stale
+#
+# ci.py tier 0 runs that check. This exists because the hand-edited version of this block
+# rotted badly: it installed SOLANA=v2.1.0 / ANCHOR=0.31.1 / RUST=1.86.0 / BITCOIN=27.1 while
+# the machine authoring the content ran solana-cli 3.1.10, anchor-cli 1.1.2, rustc 1.98.1 and
+# Bitcoin Core 31.1.0. A verifier a major version behind the content is worse than no verifier,
+# because its green is believed.
 FROM ubuntu:24.04
 
-ARG PYTHON=3.11
-ARG NODE_MAJOR=20
-ARG RUST=1.86.0
-ARG SOLANA=v2.1.0            # Agave CLI; set to the release the content declares (e.g. v4.1.1 when available)
-ARG ANCHOR=0.31.1            # anchor-cli / avm; set to the declared version (e.g. 1.1.2) when the content targets it
-ARG FOUNDRY=stable
-ARG SOLIDITY=0.8.28
-ARG BITCOIN=27.1               # Bitcoin Core (official binaries; Ubuntu 24.04 no longer packages bitcoind)
+# >>> generated from references/pins.yaml by tools/pin_refresh.py render >>>
+# pinned_on: 2026-09-07  ttl_days: 120  (edit references/pins.yaml, then: python3 tools/pin_refresh.py render)
+ARG PYTHON=3.11   # python (local-probe)
+ARG NODE_MAJOR=23   # node_major (local-probe)
+ARG RUST=1.98.1   # rust (local-probe)
+ARG SOLANA=v3.1.10   # solana (local-probe)
+ARG ANCHOR=1.1.2   # anchor (local-probe)
+ARG FOUNDRY=stable   # foundry (local-probe)
+ARG SOLIDITY=0.8.28   # solidity (declared)
+ARG BITCOIN=31.1   # bitcoin (local-probe)
+# <<< end generated block <<<
 
 ENV DEBIAN_FRONTEND=noninteractive PATH="/root/.cargo/bin:/root/.foundry/bin:/root/.local/share/solana/install/active_release/bin:/root/.avm/bin:${PATH}"
 
