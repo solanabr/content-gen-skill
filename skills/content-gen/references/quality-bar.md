@@ -168,3 +168,19 @@ artifact, not randomness.
 | Languages the labs require are declared + taught just-in-time; prerequisite is honest | JUDGE | agent / human read |
 | Toolkit-accretion / capstone SHOWS a prior rung wired in (not asserted) | JUDGE | agent / human read |
 | Scope claims (mainnet/DEX/bridge) are taught or explicitly labelled bonus | JUDGE | agent / human read |
+| **A lesson's skill tags name what THAT lesson actually teaches, not what its module is about** | JUDGE (+ADVISORY at >80% identical per module) | agent / human read; `validate_course.py briefs` |
+| No open fix sweep: a corrected claim is corrected on every surface, and every image is newer than its HTML source | HARD | `validate_course.py fixes` + `tools/fix_sweep.py` |
+
+**The skills-tag row, concretely.** The tags render on the learner's lesson card. They were derived
+from `module.teaches_skills`, so every lesson in a module got a byte-identical array *by
+construction* — 79 of 79 modules across the ten shipped courses. An audit filed the consequence: a
+31-lesson course of mostly Rust, TypeScript and Docker content credited Solana skills on every
+lesson, and its Docker-install lesson carried a slug the learner reads as "Program Development".
+Set `skills:` per brief (`lesson-brief-schema.md` §C). Read each lesson's tags back and ask whether
+a learner who finished *that* lesson has *those* skills.
+
+**The fix-sweep row, concretely.** `method/fix-protocol.md`. A correction applied at the filed line
+and nowhere else is how ~17% of a round-2 audit's findings were manufactured by round 1's fixes,
+including six shipped images still teaching models the prose beside them retracted. Open a sweep
+per corrected claim, close it when every surface is clean and every render is younger than its
+source.

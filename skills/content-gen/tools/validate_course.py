@@ -337,6 +337,12 @@ def check_briefs(m: dict) -> dict:
                 flags.append(f"{HARD}brief {lid} carries corpus signature '{sig}' — learn the move, "
                              f"never reuse the artifact/phrase (forms/course.md §Corpus stance)")
 
+        sk = b.get("skills")
+        if sk is not None and (not isinstance(sk, list)
+                               or any(not isinstance(x, str) or not x.strip() for x in sk)):
+            flags.append(f"{HARD}brief {lid} skills must be a list of non-empty strings "
+                         f"(DAG skill nodes or academy skill slugs): {sk!r}")
+
         d = b.get("difficulty")
         if isinstance(d, int) and not (1 <= d <= 3):
             flags.append(f"{ADV}brief {lid} difficulty {d} out of 1-3")
@@ -361,7 +367,61 @@ def check_briefs(m: dict) -> dict:
         # Course-wide quiz policy + statistics live in check_quiz, not here.
         flags += check_quiz_blocks(b, lid)
         flags += check_coding_challenges(b, lid)
+
+    flags += _skill_tag_advisory(m)
     return _result("briefs", flags)
+
+
+# A module's lessons are allowed to share tags; a whole module sharing ONE array is the
+# signature of nobody having set them. Floor of 3 because a 2-lesson module is a single
+# pair — no signal, and the house rule is that a metric under its sample floor says so
+# rather than firing anyway.
+SKILL_TAG_IDENTICAL_MAX = 0.8
+SKILL_TAG_MIN_LESSONS = 3
+
+
+def _skill_tag_advisory(m: dict) -> list[str]:
+    """ADVISORY when >80% of a module's lessons carry byte-identical skill tags.
+
+    A lesson's `skills` are learner-facing: the Academy renders them as the labels on the
+    lesson card. They used to be derived from `mod['teaches_skills']` alone, which made
+    every lesson in a module identical BY CONSTRUCTION — measured at 79/79 modules across
+    the ten shipped courses, and filed as an audit major when a 31-lesson Rust/TS/Docker
+    course tagged its Docker-install lesson with a slug reading "Program Development".
+
+    The tags are computed by importing `academy_export._skills_for`, the same function the
+    export calls, so this gate and the emitted YAML can never disagree about what a lesson
+    is tagged with. Setting `skills:` on the briefs is what clears the flag."""
+    lessons = m.get("lessons", [])
+    modules = m.get("modules", [])
+    if not lessons or not modules:
+        return []
+    try:
+        from academy_export import _academy_cfg, _skills_for
+    except Exception:                                             # noqa: BLE001
+        return []
+    cfg = _academy_cfg(m, {})
+    by_mod: dict[str, dict] = {mod["id"]: mod for mod in modules if "id" in mod}
+    groups: dict[str, list[tuple]] = {}
+    for l in lessons:
+        mid = l.get("module")
+        if mid not in by_mod:
+            continue
+        groups.setdefault(mid, []).append(
+            tuple(_skills_for(l.get("brief", {}) or {}, by_mod[mid], cfg)))
+    flags = []
+    for mid, tags in groups.items():
+        if len(tags) < SKILL_TAG_MIN_LESSONS:
+            continue
+        top = max(set(tags), key=tags.count)
+        n = tags.count(top)
+        if n / len(tags) > SKILL_TAG_IDENTICAL_MAX:
+            flags.append(f"{ADV}module {mid}: {n} of {len(tags)} lessons carry byte-identical "
+                         f"skill tags {list(top) or '[]'} — the signature of tags nobody set "
+                         f"per lesson (they are derived from the MODULE unless a brief sets "
+                         f"`skills:`). A lesson's tags name what THAT lesson teaches "
+                         f"(lesson-brief-schema §C; quality-bar JUDGE row).")
+    return flags
 
 
 def _has_doing_verb(s: str) -> bool:
@@ -863,9 +923,59 @@ def check_challenges(course_dir, m: dict | None = None) -> dict:
     return _result("challenges", flags)
 
 
+def check_fixes(course_dir) -> dict:
+    """No course exports mid-sweep (method/fix-protocol.md).
+
+    A correction is not finished when the filed line is fixed. It is finished when every
+    surface carrying the claim is fixed and every image rebuilt from a corrected source.
+    The round-2 audit measured the gap: **~17% of its findings were fallout from round-1
+    fixes** that landed at one line and missed the twin passage, the quiz feedback, the
+    alt text, the `visual-src` markup and the `<!-- spec -->` comment — headlined by six
+    shipped images still teaching models the prose beside them had retracted.
+
+    `fix_sweep.py plan` writes `fixes/<id>.yaml`; `fix_sweep.py close` flips it to
+    `status: closed` only when every listed surface is clean AND every listed render is
+    younger than its HTML source. Anything still `open` is HARD here, so the sweep cannot
+    be forgotten halfway — which is exactly how it was forgotten before."""
+    from pathlib import Path as _P
+    root = _P(course_dir)
+    try:
+        import fix_sweep
+    except Exception as e:                                        # noqa: BLE001
+        return _result("fixes", [f"{ADV}fix_sweep unavailable ({e}) — open fix sweeps "
+                                 f"cannot be checked"])
+    ledgers = fix_sweep.open_ledgers(root)
+    if not ledgers:
+        return _result("fixes", ["ok: no fix sweeps recorded"])
+    flags: list[str] = []
+    closed = 0
+    for p, d in ledgers:
+        fix = d.get("fix") or {}
+        fid = fix.get("id", p.stem)
+        if fix.get("status") == "closed":
+            closed += 1
+            continue
+        try:
+            fails, _warns = fix_sweep.verify(root, d)
+        except Exception as e:                                    # noqa: BLE001
+            fails = [f"ledger could not be verified: {type(e).__name__}: {e}"]
+        detail = f"; {len(fails)} surface(s) still unfixed: {fails[0]}" if fails else \
+                 "; every surface is clean — run `fix_sweep.py close` to close it"
+        flags.append(f"{HARD}fix sweep '{fid}' is still open (fixes/{p.name}){detail}")
+    if not flags:
+        flags.append(f"ok: {closed} fix sweep(s), all closed")
+    return _result("fixes", flags)
+
+
 CHECKS = {"dag": check_dag, "briefs": check_briefs, "quiz": check_quiz, "ladder": check_ladder,
           "capstone": check_capstone, "outcomes": check_outcomes,
-          "research": check_research, "artifacts": check_artifacts, "length": check_length}
+          "research": check_research, "artifacts": check_artifacts, "length": check_length,
+          "fixes": check_fixes}
+
+# Checks that read the course TREE, not the manifest. They live in CHECKS so `all` and the
+# subcommand list pick them up for free; every runner passes a course dir for these names
+# and a manifest for the rest.
+COURSE_DIR_CHECKS = {"fixes"}
 
 
 # ── runner ──────────────────────────────────────────────────────────────────────
@@ -877,10 +987,15 @@ def _print(res: dict) -> None:
         print("   - " + f)
 
 
-def run(m: dict, names: list[str]) -> int:
+def run(m: dict, names: list[str], course_dir=None) -> int:
     any_hard = False
     for n in names:
-        res = CHECKS[n](m)
+        if n in COURSE_DIR_CHECKS:
+            if course_dir is None:
+                continue                      # tree-only check; nothing to read from a manifest
+            res = CHECKS[n](course_dir)
+        else:
+            res = CHECKS[n](m)
         _print(res)
         any_hard = any_hard or res["hard"]
     print(f"\nGATE: {'FAIL (hard)' if any_hard else 'PASS'}")
@@ -1266,6 +1381,57 @@ def selftest() -> int:
         (exdir / "tests.json").write_text('[]', "utf-8")
         check(check_challenges(td2, cm)["hard"], "empty tests.json array -> challenges HARD")
 
+    # ── skills-tag advisory: identical tags across a module ──────────────────────
+    st = _good_manifest()
+    st["academy"] = {"skills_map": {"account-model": "account-model",
+                                    "programs-instructions": "program-development",
+                                    "pdas": "pdas"}, "default_skills": []}
+    base = copy.deepcopy(st["lessons"][0])
+    for i in (2, 3):                      # 3 lessons in m-accounts, none setting `skills`
+        extra = copy.deepcopy(base)
+        extra["id"] = f"the-counter-{i}"
+        extra["order"] = i
+        extra["brief"]["id"] = extra["id"]
+        st["lessons"].append(extra)
+    fl = check_briefs(st)["flags"]
+    check(any("byte-identical skill tags" in f and f.startswith(ADV) for f in fl),
+          "a module whose lessons all derive the same tags -> briefs ADVISORY")
+    check(not check_briefs(st)["hard"], "the skills-tag flag is ADVISORY, never HARD")
+    for j, sk in ((0, ["account-model"]), (2, ["programs-instructions"]), (3, ["pdas"])):
+        st["lessons"][j]["brief"]["skills"] = sk
+    check(not any("byte-identical skill tags" in f for f in check_briefs(st)["flags"]),
+          "per-lesson brief `skills:` clears the flag")
+    two = _good_manifest()               # 1 lesson per module: under the sample floor
+    check(not any("byte-identical skill tags" in f for f in check_briefs(two)["flags"]),
+          "a module under 3 lessons is not flagged (one pair is not a signal)")
+    bs = _good_manifest()
+    bs["lessons"][0]["brief"]["skills"] = "pdas"
+    check(any("skills must be a list" in f for f in check_briefs(bs)["flags"]),
+          "a scalar `skills` -> briefs HARD (it becomes a YAML array on the lesson card)")
+
+    # ── fixes: no course exports mid-sweep ───────────────────────────────────────
+    import fix_sweep as _fs
+    with tempfile.TemporaryDirectory() as tf:
+        c = _P(tf) / "content" / "courses" / "demo"
+        (c / "lessons" / "drafts").mkdir(parents=True)
+        check(not check_fixes(c)["hard"], "no fixes/ dir -> fixes check clean")
+        (c / "lessons" / "drafts" / "m00-l1-x.md").write_text(
+            "# T\n\nthe cap is 200 pulls per 6 hours.\n", "utf-8")
+        _fs.cmd_plan(c, "200 pulls per 6 hours", "fix-cap", None, None, None)
+        r = check_fixes(c)
+        check(r["hard"] and any("still open" in f for f in r["flags"]),
+              "an open fix sweep -> fixes HARD (the course cannot export mid-sweep)")
+        check(any("still unfixed" in f for f in r["flags"]),
+              "the HARD flag names a surface that is still wrong, not just the ledger")
+        (c / "lessons" / "drafts" / "m00-l1-x.md").write_text(
+            "# T\n\nthe cap is whatever the vendor publishes today.\n", "utf-8")
+        check(check_fixes(c)["hard"],
+              "text fixed but the ledger still open -> still HARD (close it deliberately)")
+        check(_fs.cmd_check(c, "fix-cap", None, close=True) == 0, "close succeeds once clean")
+        check(not check_fixes(c)["hard"], "a closed sweep -> fixes clean")
+        check("fixes" in CHECKS and "fixes" in COURSE_DIR_CHECKS,
+              "check_fixes is registered in CHECKS as a course-dir check")
+
     print("\n" + ("VALIDATOR SELFTESTS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1
 
@@ -1290,12 +1456,18 @@ def main(argv=None) -> int:
         return 2
     m = load_manifest(src)
     names = list(CHECKS) if a.cmd == "all" else ([] if a.cmd in ("drafts", "challenges") else [a.cmd])
+    course_dir = getattr(a, "course", None)
     any_hard = False
     for n in names:
-        res = CHECKS[n](m)
+        if n in COURSE_DIR_CHECKS:
+            if not course_dir:
+                print(f"[skip] {n}: needs --course <dir> (it reads the course tree)")
+                continue
+            res = CHECKS[n](course_dir)
+        else:
+            res = CHECKS[n](m)
         _print(res)
         any_hard = any_hard or res["hard"]
-    course_dir = getattr(a, "course", None)
     if course_dir and a.cmd in ("quiz", "all"):
         res = check_quiz_files(course_dir)
         _print(res)

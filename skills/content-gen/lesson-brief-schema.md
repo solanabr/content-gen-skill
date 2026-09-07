@@ -63,6 +63,7 @@ lesson:
   objectives:            # measurable, Bloom-tagged; 1-3 max
     - {bloom: implement, statement: "derive a canonical PDA and write per-user account data"}
   prerequisites:         # lesson/skill ids (must already be taught — DAG check)
+  skills:                # what THIS lesson teaches, as DAG skill nodes or academy skill slugs → the learner-facing tags on the lesson card. OMIT and the export derives them from the MODULE, which gives every lesson in that module the same array (validator ADVISORY at >80% identical).
   hook:                  # the FELT problem / exploit / demo that opens it  → feeds voice pain-first opener
   concept_spec:          # the idea(s) to teach + the worked example to build (one new element per pass)
   artifact_spec:         # exactly what the learner builds this lesson (the ladder rung / accretion)

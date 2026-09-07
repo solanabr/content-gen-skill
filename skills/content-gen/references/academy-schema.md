@@ -250,4 +250,8 @@ auto-detects `branding/banner.{webp,jpg,jpeg}`, copies it to `assets/`, and emit
 - **code** ← the lesson brief's `coding_challenges`; each challenge's `starter`/`solution`/`tests` files are
   copied into `<challenge-id>/` under the lesson dir. `language ∈ {rust, typescript}` only — Bitcoin/CLI/
   Python/Solidity lessons carry quizzes but no code block.
-- `skills` ← mapped from the course DAG nodes to `skills.yaml` slugs.
+- `skills` ← the brief's own `skills:` when set, mapped through `academy.skills_map` (an entry that
+  is already a `skills.yaml` slug passes through). Only when a brief has none does the export fall
+  back to the MODULE's `teaches_skills` + the brief's prerequisites — a fallback that gives every
+  lesson in the module the same array, which is why `validate_course.py briefs` flags a module whose
+  lessons are >80% byte-identical. These tags render on the learner's lesson card: set them per lesson.

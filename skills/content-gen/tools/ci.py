@@ -143,7 +143,8 @@ def t1_gates() -> bool:
         m = load_manifest(d)
         hard = False
         for name, fn in vc.CHECKS.items():
-            res = fn(m)
+            # a few checks read the course TREE (open fix sweeps), not the manifest
+            res = fn(d) if name in getattr(vc, "COURSE_DIR_CHECKS", ()) else fn(m)
             hard = hard or res["hard"]
             for f in res["flags"]:
                 if f.startswith(vc.HARD):
