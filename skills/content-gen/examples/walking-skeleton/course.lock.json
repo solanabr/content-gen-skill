@@ -5,7 +5,7 @@
       "edited_by_human": false
     },
     "manifest.json": {
-      "sha256": "6bb9584125a8c5d6414315338a449764c005aa3d11b42c7f939fd9cebfd105dd",
+      "sha256": "7cf5a33d3bbb3cca6aedb5935735e2e8a7790adb7816c815ca20c4b6fda2c030",
       "edited_by_human": false
     },
     "modules/00-first-program/module.yaml": {
@@ -29,7 +29,7 @@
       "edited_by_human": false
     },
     "lessons/research/m01-l1-pda-per-user.research.yaml": {
-      "sha256": "c1f43a78b0e18e79edba6c863ccc50397e0baa64c337ebce8baf735cfd91ac37",
+      "sha256": "2ede53a048bb8f9184d76c3de8df3fb2ab337c9b0296cd93048f64372602d462",
       "edited_by_human": false
     },
     "lessons/facts/m01-l1-pda-per-user.facts.md": {

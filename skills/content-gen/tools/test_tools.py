@@ -39,6 +39,7 @@ sys.path.insert(0, str(HERE))
 REGISTERED = [
     "course_lib",
     "pin_refresh",
+    "fact_freshness",        # branch: feat/fact-freshness (per-claim expiry + publish gate)
     "validate_course",
     "scaffold_course",
     "verify_code",

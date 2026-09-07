@@ -83,7 +83,10 @@ whether it MUST ground against live sources.
    (drip / effort / freshness). _Loads:_ `design-spine.md` §§5, 9.
 9. **Research scaffolds.** Per lesson: claims/APIs/numbers to ground, with a
    `source_priority`; freeze verified facts. **MUST GROUND.** → `lessons/research/*`
-   + `lessons/facts/*`.
+   + `lessons/facts/*`. Every claim carries `verified_on` (today's date), a `kind`
+   from the closed set, and a **runnable `recheck` probe** — the RPC call or `curl`,
+   not prose. A volatile number that lives only in `frozen_facts` is on no clock at
+   all. _Loads:_ `method/fact-recheck.md`.
 10. **Assessment & capstone.** Proof model; **gate on doing**; capstone uses only
     taught skills. _Loads:_ `design-spine.md` §6.
 11. **Validate, then EMIT.** Assemble `manifest.json`
@@ -118,9 +121,19 @@ whether it MUST ground against live sources.
     python3 "$SKILL/tools/render_visuals.py" scaffold-banner content/courses/<id> # course banner → Academy thumbnail
     #   ... author branding/banner.html (references/banner.md), then:
     python3 "$SKILL/tools/render_visuals.py" render-banner   content/courses/<id> # → branding/banner.webp (≤1MiB)
+    python3 "$SKILL/tools/fact_freshness.py" stale --course content/courses/<id>  # BLOCKING: no fact past its TTL
     python3 "$SKILL/tools/academy_export.py" emit --course content/courses/<id> --out content/academy/courses/<slug>
     python3 "$SKILL/tools/verify_challenges.py" content/courses/<id>              # starter fails / solution passes
     ```
+    **`fact_freshness.py stale` is blocking and must be green before the export runs.** It
+    exits non-zero on any research claim past its TTL, because publishing is the last moment
+    a fact can be caught — an audit of five shipped courses found rent constants matching no
+    live cluster, a dead API taught as live, and a rent mechanism the runtime now rejects,
+    every one of them a fact that was true when written. Work the list with
+    `fact_freshness.py probes --course …`, re-probe through the kit surfaces, then update
+    `verified_on`. `academy_export.py` enforces the same rule itself and refuses to project
+    a stale course; `--allow-stale` overrides it and stamps the count into the export
+    summary. Method: `method/fact-recheck.md`.
     The export embeds each lesson's rendered visuals as `![alt](assets/vNN-*.png)` and copies the
     PNGs + HTML sources — so the Step-12 visual pass (render_visuals.py) must have run first, or
     visuals degrade to blockquote placeholders with warnings.
@@ -138,7 +151,7 @@ whether it MUST ground against live sources.
 | 5 patterns | only the routed `patterns/*.md` | no |
 | 6 sequence | `design-spine.md` §§3–5 | **yes** |
 | 7 briefs | `lesson-brief-schema.md` | reuse step 6 |
-| 8–10 cadence/research/assess | `design-spine.md` §§5,6,9 | **yes** |
+| 8–10 cadence/research/assess | `design-spine.md` §§5,6,9 + `method/fact-recheck.md` (step 9) | **yes** |
 | 11 emit | `references/output-contract.md`, `references/quality-bar.md`, `tools/` | — |
 | 12 write | `references/visual-placeholders.md` (+ writer-style if installed) | reuse 9 |
 | 13 plugins/publish (optional) | `references/academy-schema.md`, `lesson-brief-schema.md` §H, `references/banner.md` | — |
@@ -161,7 +174,7 @@ python3 "$SKILL/tools/scaffold_course.py" emit --manifest m.json --out content/c
 ```
 
 - `tools/validate_course.py` — `dag | briefs | quiz | ladder | capstone | outcomes | research |
-  artifacts | length | drafts | challenges | all` (`drafts` HARD-enforces the scaled visuals floor;
+  freshness | artifacts | length | drafts | challenges | all` (`drafts` HARD-enforces the scaled visuals floor;
   `quiz` is the whole-course quiz gate). HARD = breaks the DAG walk or the writer handoff;
   ADVISORY = a smell to weigh. A statistical metric under its sample floor says
   **INCONCLUSIVE, not passed**, and never green-lights a course by staying quiet.
@@ -205,6 +218,15 @@ python3 "$SKILL/tools/scaffold_course.py" emit --manifest m.json --out content/c
   markdown; the PNG is written beside the lesson. `scaffold-banner` / `render-banner` produce the
   one course-level visual — the Academy card thumbnail — in `branding/` (photo-backdrop or
   pure-brand; `references/banner.md`).
+- `tools/fact_freshness.py` — `report | stale | probes`: **per-claim expiry.** Every
+  `research.claims[]` entry carries `verified_on` and inherits a TTL from its `kind`
+  (`course_lib.TTL_DAYS`: on-chain numbers 14d, CLI defaults / version pins / protocol
+  params 30d, APIs 60d, concepts 365d). `stale` exits non-zero on anything past its TTL and
+  is the **blocking publish gate** in step 13; `probes` emits the ordered re-check dispatch
+  list with each claim's runnable probe. Reads the manifest AND the on-disk
+  `lessons/research/*.yaml`, fail-closed on disagreement. This exists because the same
+  defect shipped six times: a fact that was true when written, re-shipped unread
+  (`method/fact-recheck.md`).
 - `tools/academy_export.py` — the **optional Academy publish projection**: `emit --course
   content/courses/<id> --out content/academy/courses/<slug>` materializes the platform's YAML
   block tree (`course.yaml` + per-lesson `lesson.yaml` with prose/quiz/code blocks + copied
@@ -212,7 +234,8 @@ python3 "$SKILL/tools/scaffold_course.py" emit --manifest m.json --out content/c
   Auto-detects `branding/banner.{webp,jpg,jpeg}` → course `thumbnail:`; `duration` is HOURS
   (derived from `length_target.hours` unless `academy.duration` is set).
   One-way and additive — reads the course read-only, writes only under `--out`
-  (`references/academy-schema.md`).
+  (`references/academy-schema.md`). **Refuses to project a course with a past-TTL research
+  claim**; `--allow-stale` overrides and stamps the count into the summary.
 - `tools/verify_challenges.py` — proves the **Academy runtime contract** for every
   `coding_challenge`: the solution passes all `tests.json` cases and the starter fails ≥1, in a
   real toolchain (tsc+node for TypeScript; rustc / `cargo check` vs anchor-lang for Rust). FAIL =
@@ -254,6 +277,7 @@ file only when you are doing that job.
 | **`known-failure-modes.md`** | **Read first.** The failures that recur across waves — the substring-vs-real-usage law (a grep for a tool name flags "forgets" and "byte cast"), and **SKIP is not PASS**. |
 | `brief-fanout.md` | One agent per module writing lesson briefs, then `assemble_manifest.py` folding them back. |
 | `lesson-writing.md` | Working the queue one lesson at a time through the voice seam. |
+| `fact-recheck.md` | Re-verifying an expired claim: the TTL table and its evidence, how the stale list is dispatched, and the sweep rule (one correction, every site). |
 | `quiz-authoring.md` | Writing the questions. Option order is not in it — that is `tools/quiz_layout.py`'s job, deliberately. |
 | `review-boards.md` | The adversarial review passes and what each board owns. |
 | `wave-orchestration.md` | Running several courses at once without them colliding. |

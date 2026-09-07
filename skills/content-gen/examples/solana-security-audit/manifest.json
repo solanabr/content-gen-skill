@@ -481,7 +481,9 @@
             "verify": "name + that it targets Anchor programs; confirm current entrypoint/macro names",
             "status": "verified",
             "evidence": "Ackee Trident docs (verified via MCP during authoring)",
-            "value": null
+            "value": null,
+            "recheck": "context7: resolve-library-id 'trident' then query-docs 'fuzz target macro'",
+            "verified_on": "2026-09-07"
           },
           {
             "id": "C2",
@@ -492,7 +494,8 @@
             "verify": "decide canonical tool for this cohort; record the exact invocation",
             "status": "gathering",
             "evidence": "TODO: confirm before writing the lab",
-            "value": null
+            "value": null,
+            "recheck": "context7: query-docs anchor 'fuzz subcommand'; then `anchor fuzz --help`"
           }
         ],
         "code_to_ground": [
@@ -654,7 +657,7 @@
         }
       ],
       "freshness_policy": {
-        "onchain_numbers_restale_after_days": 60,
+        "onchain_numbers_restale_after_days": 14,
         "applies_to": [
           "fuzzing-with-trident"
         ]

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import datetime as _dt
 import shlex
 import shutil
 import subprocess
@@ -189,6 +190,12 @@ def t2_fixtures() -> bool:
     def mut_signature(m): m["lessons"][0]["brief"]["hook"] = "like the Movie Review app"
     def mut_passive(m): m["lessons"][0]["brief"]["assessment"] = "watch the recording"
     def mut_capstone(m): m["assessment"]["capstone"]["requires_skills"] = ["never-taught"]
+    def mut_stale(m): m["lessons"][0]["research"] = {"claims": [
+        {"id": "C1", "kind": "onchain-number", "status": "verified", "verified_on": "2020-01-01",
+         "mcp": "helius", "recheck": "rpc getMinimumBalanceForRentExemption 165"}]}
+    def mut_unprobeable(m): m["lessons"][0]["research"] = {"claims": [
+        {"id": "C1", "kind": "onchain-number", "status": "verified", "mcp": "helius",
+         "verified_on": _dt.date.today().isoformat()}]}
 
     fixtures = [
         ("non-kebab id", mut_id, vc.check_dag, "not kebab-case"),
@@ -197,6 +204,8 @@ def t2_fixtures() -> bool:
         ("corpus signature", mut_signature, vc.check_briefs, "corpus signature"),
         ("passive assessment", mut_passive, vc.check_briefs, "passive"),
         ("untaught capstone skill", mut_capstone, vc.check_capstone, ""),
+        ("expired claim", mut_stale, vc.check_freshness, "TTL"),
+        ("volatile claim with no recheck probe", mut_unprobeable, vc.check_freshness, "recheck"),
     ]
     ok = True
     for name, mut, check, needle in fixtures:

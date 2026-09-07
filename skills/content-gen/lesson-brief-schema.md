@@ -223,6 +223,19 @@ course lesson consistent when they pass through the same voice.
 - **`flow.recap` is honest.** It calls back only what the previous lesson genuinely did or
   built. A recap that invents a prior experience breaks the spine; the writer must open on
   the real previous artifact/step.
+- **Every claim carries an expiry.** `lesson.research.claims[]` takes `verified_on` (ISO
+  date, HARD-required when `status: verified`), an optional `ttl_days` that may only
+  SHORTEN its kind's default, and a `recheck` holding the exact re-runnable probe. The
+  `kind` vocabulary is closed: `concept | number | api | code | onchain-number |
+  cli-default | version-pin | protocol-param`. Defaults live once in
+  `tools/course_lib.py` (`TTL_DAYS`); the workflow is `method/fact-recheck.md`; the gates
+  are `validate_course.py freshness`, `fact_freshness.py stale`, and `academy_export.py`,
+  which refuses to publish a past-TTL claim without `--allow-stale`.
+- **A `frozen_fact` that can change is a `claim`.** The facts file is a diff target for the
+  writer, not an expiry ledger — nothing in `frozen_facts` is on any clock. A version, a
+  rent figure, an endpoint, or a CLI default belongs in `claims[]` WITH a `recheck`, and
+  may then also be frozen. Eight of the ten courses in the corpus froze volatile numbers
+  and declared zero claims, which is precisely why the rent constants shipped wrong.
 
 
 ## H. Academy plugins — quizzes & coding challenges (optional, additive)

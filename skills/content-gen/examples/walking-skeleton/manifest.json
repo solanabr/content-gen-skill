@@ -300,7 +300,9 @@
             "verify": "core docs: programs stateless, state in accounts",
             "status": "verified",
             "evidence": "solana-dev: Accounts / PDA docs",
-            "value": null
+            "value": null,
+            "recheck": "solana-dev: Solana_Documentation_Search 'account model state in accounts'",
+            "verified_on": "2026-09-07"
           },
           {
             "id": "C2",
@@ -311,7 +313,9 @@
             "verify": "API name + canonical-bump semantics current",
             "status": "verified",
             "evidence": "solana-dev: PDA section",
-            "value": null
+            "value": null,
+            "recheck": "solana-dev: Solana_Documentation_Search 'find_program_address canonical bump'",
+            "verified_on": "2026-09-07"
           },
           {
             "id": "F3",
@@ -322,7 +326,8 @@
             "verify": "pull live devnet figure; record exact value + date",
             "status": "gathering",
             "evidence": "TODO: helius getMinimumBalanceForRentExemption",
-            "value": null
+            "value": null,
+            "recheck": "helius heliusChain getMinimumBalanceForRentExemption 17 --cluster devnet"
           }
         ],
         "code_to_ground": [
@@ -407,7 +412,7 @@
         }
       ],
       "freshness_policy": {
-        "onchain_numbers_restale_after_days": 30,
+        "onchain_numbers_restale_after_days": 14,
         "applies_to": [
           "pda-per-user"
         ]

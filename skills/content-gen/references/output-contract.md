@@ -129,10 +129,17 @@ whole-lesson backbone).
   "source_priority": ["solana-dev","context7","helius"],   // names from ../references/research-grounding.md
   "claims": [
     { "id": "C2", "claim": "PDAs derive via find_program_address(seeds, program_id).",
-      "kind": "api",                                        // concept|number|api|code|onchain-number
+      "kind": "api",         // concept|number|api|code|onchain-number|cli-default|version-pin|protocol-param
       "mcp": "solana-dev", "query": "find_program_address canonical bump",
       "verify": "API name + canonical-bump semantics current", "status": "verified",
-      "evidence": "solana-dev: PDA section", "value": null } ],
+      "evidence": "solana-dev: PDA section", "value": null,
+      "verified_on": "2026-09-07",       // REQUIRED when status is verified (ISO date)
+      "recheck": "solana-dev: Solana_Documentation_Search 'find_program_address'",
+      "ttl_days": 30 },                  // OPTIONAL, and may only SHORTEN the kind default
+    { "id": "C3", "claim": "ATA rent-exempt minimum on mainnet is 2,077,224 lamports.",
+      "kind": "onchain-number", "mcp": "helius", "status": "verified",
+      "value": "2077224 lamports (mainnet-beta)", "verified_on": "2026-09-07",
+      "recheck": "helius heliusChain getMinimumBalanceForRentExemption 165 --cluster mainnet" } ],
   "code_to_ground": [{ "id": "K1", "what": "seeds array", "autofixer": "required", "status": "verified" }],
   "open_questions": [],
   "frozen_facts": ["PDAs derive via find_program_address(seeds, program_id) -> (addr, canonical_bump).",
@@ -141,6 +148,23 @@ whole-lesson backbone).
 `frozen_facts` are projected to `lessons/facts/<id>.facts.md` (one per line) — the
 exact `--facts` input for writer-style's `diff` gate, closing the verification loop
 with the writer's own tooling.
+
+**Every claim expires.** `verified_on` + `ttl_days` + `recheck` are the anti-staleness
+layer; `validate_course.py freshness` and `fact_freshness.py stale` read them, and
+`academy_export.py` refuses to publish past a TTL. TTL defaults live per `kind` in
+`tools/course_lib.py` (`TTL_DAYS`), not per claim, so retuning one number reaches every
+course: on-chain numbers 14d, CLI defaults / version pins / protocol params / bare numbers
+30d, APIs 60d, code 90d, concepts 365d. Rationale and the re-check workflow are in
+[`../method/fact-recheck.md`](../method/fact-recheck.md).
+
+- `recheck` is a **runnable probe**, not prose — the RPC call, the `curl`, the `--version`.
+  It is HARD-required on `onchain-number`, `cli-default`, `protocol-param`, `version-pin`.
+- `verified_on` is HARD-required on a `verified` claim. A `(dispatched YYYY-MM-DD)` marker
+  inside `evidence` is accepted as a fallback, but write the field.
+- A claim with no `kind` inherits the 30-day volatile default, never the concept TTL.
+- `frozen_facts` with **no `claims[]`** means the freshness gate is silent for that lesson
+  because nothing is declared, not because the facts are fresh. Promote volatile frozen
+  facts to claims.
 
 ### Cadence (`manifest.cadence`) — pedagogy + release
 ```jsonc
@@ -154,8 +178,12 @@ with the writer's own tooling.
     "schedule": [{ "week": 1, "publish": ["hello","counter"], "est_effort_hours": 6 }],
     "per_lesson_effort": [{ "lesson": "pda-state", "draft_words": 1200, "research_hours": 1.5,
                             "write_hours": 2, "review_hours": 1 }],
-    "freshness_policy": { "onchain_numbers_restale_after_days": 30, "applies_to": ["cpi-deposit"] } } }
+    "freshness_policy": { "onchain_numbers_restale_after_days": 14, "applies_to": ["cpi-deposit"] } } }
 ```
+`freshness_policy` is **read by the gate** (`course_lib.course_ttl_policy`): it narrows the
+`onchain-number` TTL for the lessons in `applies_to` (empty = the whole course). Like a
+per-claim `ttl_days`, it may only SHORTEN the kind default — a course asking for 90 days on
+rent figures gets 14 and an advisory saying so.
 
 ### Assessment (`manifest.assessment`)
 ```jsonc
