@@ -120,10 +120,14 @@ def check_dag(m: dict) -> dict:
 # ── academy plugins: quiz + coding-challenge specs (optional, additive) ─────────
 
 def check_quiz_blocks(b: dict, lid: str) -> list[str]:
-    """Validate a lesson brief's optional `quiz_blocks` against the Academy quiz schema
-    (references/academy-schema.md; schema/quiz.schema.json). Structural only. HARD:
-    stable unique ids, ≥2 options, correctness keyed to a stable option id, and the
-    single/multi correctness rule. ADVISORY: missing per-distractor feedback / explanation."""
+    """Per-brief structural validation of `quiz_blocks` (references/academy-schema.md).
+    Scope is deliberately narrow: the things that must hold for ONE brief to be a
+    well-formed document — stable unique ids, correctness keyed to a stable option id,
+    and the single/multi correctness rule.
+
+    The AUTHORING policy (option counts, feedback on every option, explanations,
+    em-dashes) and every statistical property live in `check_quiz`, which sees the
+    whole course. Duplicating them here would let the two disagree."""
     qbs = b.get("quiz_blocks")
     if qbs is None:
         return []
@@ -149,10 +153,8 @@ def check_quiz_blocks(b: dict, lid: str) -> list[str]:
                 flags.append(f"{HARD}brief {where} q'{qid}' has no prompt")
             opts = q.get("options") or []
             if len(opts) < 2:
-                flags.append(f"{HARD}brief {where} q'{qid}' needs ≥2 options")
-            elif len(opts) < 3:
-                flags.append(f"{ADV}brief {where} q'{qid}' has only 2 options — published courses "
-                             f"use 3 (a coin-flip quiz gates nothing)")
+                flags.append(f"{HARD}brief {where} q'{qid}' needs ≥2 options "
+                             f"(the authoring floor is 4 — see check_quiz)")
             oids = [str((o or {}).get("id", "")).strip() for o in opts]
             if any(not oid for oid in oids):
                 flags.append(f"{HARD}brief {where} q'{qid}' has an option with no id "
@@ -166,56 +168,76 @@ def check_quiz_blocks(b: dict, lid: str) -> list[str]:
                              f"correct option (has {n_correct})")
             if multi and n_correct < 1:
                 flags.append(f"{HARD}brief {where} q'{qid}' multi-select needs ≥1 correct option")
-            for o in opts:
-                o = o or {}
-                if o.get("correct") is False and not str(o.get("feedback", "")).strip():
-                    flags.append(f"{ADV}brief {where} q'{qid}' wrong option '{o.get('id')}' has no "
-                                 f"feedback (the platform shows it on a wrong pick)")
-            if not str(q.get("explanation", "")).strip():
-                flags.append(f"{ADV}brief {where} q'{qid}' has no explanation")
     return flags
 
 
-def check_quiz_distribution(m: dict) -> list[str]:
-    """Course-level answer-POSITION audit across every single-select quiz question.
-    Correctness is keyed to option id, but a learner sees positions — when the correct
-    answer sits in the same slot lesson after lesson (the all-'A' failure that shipped
-    once), the whole course is guessable without reading. HARD on >50% one-slot skew
-    once the sample is meaningful (≥6 questions); ADVISORY on the other classic tell,
-    the correct option being the longest label. Target: a roughly even spread."""
-    positions: list[int] = []
-    longest = 0
-    for l in m.get("lessons", []):
-        for qb in (l.get("brief", {}) or {}).get("quiz_blocks") or []:
-            for q in (qb or {}).get("questions") or []:
-                q = q or {}
-                if q.get("multiSelect"):
-                    continue
-                opts = [o or {} for o in (q.get("options") or [])]
-                idx = [i for i, o in enumerate(opts) if o.get("correct") is True]
-                if len(idx) != 1:
-                    continue  # structural breakage is already HARD in check_quiz_blocks
-                positions.append(idx[0])
-                lens = [len(str(o.get("label", ""))) for o in opts]
-                if len(lens) >= 2 and lens[idx[0]] == max(lens) and lens.count(max(lens)) == 1:
-                    longest += 1
-    n = len(positions)
-    if n < 6:
-        return []
+def check_quiz(m: dict) -> dict:
+    """The course-wide quiz gate. Statistics and authoring policy, in one place.
+
+    This replaces `check_quiz_distribution`, which HARD-failed ">50% of keys in one
+    slot" and nothing else. That gate was satisfiable by instruction, and it was:
+    `content/wave2/_briefs_emit.wf.js` told the model to seed each module's first
+    answer at `mi % 3` and rotate forward. Every wave-2 course came out
+    near-perfectly balanced on the marginal the gate measured, and near-perfectly
+    PREDICTABLE on the sequence it did not — best order-1 Markov accuracy 85.4%,
+    86.2%, 92.0%, 94.0% against 39.6% for an honest shuffle.
+
+        THE LAW: when a statistical property must hold, COMPUTE IT IN A TOOL.
+        Never ask for it in a prompt. A stronger instruction produces a different
+        artifact, not randomness. Option order is assigned by
+        `tools/quiz_layout.py permute`; hand-ordering is a gate failure.
+
+    Every number here comes from `tools/quiz_metrics.py`, which is also what
+    `quiz_layout.py report` prints, so the gate and the report cannot disagree.
+    Severity maps straight across: metric ERROR -> HARD, metric WARN -> ADVISORY.
+
+    A metric under its sample floor reports "INCONCLUSIVE, not passed" and names
+    what it could not rule out. The old gate returned [] below n=6; that quiet pass
+    is the failure mode this check exists to remove.
+
+    Ledger asymmetry: an ABSENT layout ledger is advisory (the course simply has not
+    been through `permute` yet, and the statistics above still judge it), but a
+    DRIFTED or forged ledger is HARD — that is someone hand-ordering after the fact.
+    """
+    import quiz_metrics
+    import quiz_layout
+
+    rep = quiz_metrics.analyse(m)
     flags: list[str] = []
-    counts: dict[int, int] = {}
-    for p in positions:
-        counts[p] = counts.get(p, 0) + 1
-    top_pos, top_n = max(counts.items(), key=lambda kv: kv[1])
-    if top_n / n > 0.5:
-        dist = {p + 1: c for p, c in sorted(counts.items())}
-        flags.append(f"{HARD}quiz correct answers are position-skewed: {top_n}/{n} sit at option "
-                     f"position {top_pos + 1} (distribution {dist}) — spread them roughly evenly; "
-                     f"a fixed slot makes every quiz guessable without reading")
-    if longest / n > 0.7:
-        flags.append(f"{ADV}the correct option has the longest label in {longest}/{n} single-select "
-                     f"questions — write distractors matching the answer's length and register")
-    return flags
+    for f in rep.findings:
+        prefix = HARD if f.severity == quiz_metrics.ERROR else ADV
+        flags.append(f"{prefix}quiz {f.metric}: {f.message}")
+
+    if rep.questions:
+        for dup in quiz_layout.check_addressing(m):
+            flags.append(f"{HARD}quiz duplicate question address {dup} — question ids are not "
+                         f"unique within a course, so the layout ledger is keyed on "
+                         f"(courseId, lesson, block, question); this pair collides")
+        problems = quiz_layout.verify(m)
+        if problems and quiz_layout.LEDGER_KEY not in m:
+            flags.append(f"{ADV}quiz layout: {problems[0]}")
+        else:
+            for p in problems:
+                flags.append(f"{HARD}quiz layout: {p}")
+
+    if not flags:
+        flags.append(f"ok: {len(rep.questions)} quiz question(s), every metric clean")
+    return _result("quiz", flags)
+
+
+def check_quiz_files(course_dir) -> dict:
+    """Quizzes ship INLINE in `lesson.yaml`. A standalone `*.quiz.yaml` lints green
+    and the platform compiler silently drops it, so the lesson ships with no check
+    at all — the worst possible failure, because nothing reports it."""
+    from pathlib import Path as _P
+    root = _P(course_dir)
+    stray = sorted(p for p in root.rglob("*.quiz.yaml"))
+    if not stray:
+        return _result("quiz-files", ["ok: no standalone quiz files"])
+    return _result("quiz-files", [
+        f"{HARD}standalone quiz file {p.relative_to(root)} — quizzes are emitted INLINE as a "
+        f"`type: quiz` block in lesson.yaml; a `*.quiz.yaml` lints green and is then silently "
+        f"dropped by the platform compiler" for p in stray])
 
 
 def check_coding_challenges(b: dict, lid: str) -> list[str]:
@@ -336,9 +358,9 @@ def check_briefs(m: dict) -> dict:
                          f"~{LESSON_TARGET_MIN}-4500w (forms/course.md). Raise the target.")
 
         # Optional Academy plugins (additive): validate their specs if present.
+        # Course-wide quiz policy + statistics live in check_quiz, not here.
         flags += check_quiz_blocks(b, lid)
         flags += check_coding_challenges(b, lid)
-    flags += check_quiz_distribution(m)
     return _result("briefs", flags)
 
 
@@ -736,13 +758,20 @@ def check_drafts(course_dir, m: dict | None = None) -> dict:
 
 def check_research(m: dict) -> dict:
     """Kit dispatch is literal (research-grounding.md): a verified claim must cite a
-    kit surface; briefed lessons without a research scaffold are flagged."""
+    kit surface, and every briefed lesson carries a research scaffold.
+
+    The missing-scaffold case was advisory until 2026-09-07. Advisory meant "the
+    lesson was written from the model's memory and nobody recorded where anything
+    came from", which is the same class of defect as an unrunnable code block: it
+    ships, it reads fine, and it is wrong. Grounding is mandatory (SKILL.md step 9,
+    quality-bar.md §5), so the gate now says so."""
     flags: list[str] = []
     for l in m.get("lessons", []):
         lid = l.get("id", "?")
         r = l.get("research")
         if not r:
-            flags.append(f"{ADV}lesson {lid} has no research scaffold (SKILL.md step 9 is per-lesson)")
+            flags.append(f"{HARD}lesson {lid} has no research scaffold — SKILL.md step 9 is "
+                         f"per-lesson and grounding is mandatory (references/research-grounding.md)")
             continue
         for c in r.get("claims", []):
             surf = str(c.get("mcp", ""))
@@ -834,7 +863,7 @@ def check_challenges(course_dir, m: dict | None = None) -> dict:
     return _result("challenges", flags)
 
 
-CHECKS = {"dag": check_dag, "briefs": check_briefs, "ladder": check_ladder,
+CHECKS = {"dag": check_dag, "briefs": check_briefs, "quiz": check_quiz, "ladder": check_ladder,
           "capstone": check_capstone, "outcomes": check_outcomes,
           "research": check_research, "artifacts": check_artifacts, "length": check_length}
 
@@ -1037,8 +1066,14 @@ def selftest() -> int:
         check(any("prose wall" in f for f in check_drafts(td)["flags"]),
               "700+ word prose wall -> drafts HARD")
 
-    # research: verified claim via non-kit surface
+    # research: a missing scaffold is HARD (promoted 2026-09-07 — grounding is mandatory)
     rg = _good_manifest()
+    check(any("no research scaffold" in f for f in check_research(rg)["flags"])
+          and check_research(rg)["hard"], "lesson with no research scaffold -> research HARD")
+    for _l in rg["lessons"]:
+        _l["research"] = {"claims": []}
+    check(not check_research(rg)["hard"], "every lesson scaffolded -> research clean")
+    # verified claim via non-kit surface
     rg["lessons"][0]["research"] = {"claims": [
         {"id": "C1", "mcp": "canonical-record", "status": "verified"}]}
     check(check_research(rg)["hard"], "verified claim via non-kit surface -> research HARD")
@@ -1076,9 +1111,10 @@ def selftest() -> int:
     qg = _good_manifest()
     qg["lessons"][0]["brief"]["quiz_blocks"] = [{"questions": [
         {"id": "q1", "prompt": "Base unit of SOL?", "multiSelect": False,
-         "options": [{"id": "a", "label": "Gwei", "correct": False, "feedback": "Ethereum's."},
-                     {"id": "b", "label": "Lamport", "correct": True},
-                     {"id": "c", "label": "Satoshi", "correct": False, "feedback": "Bitcoin's."}],
+         "options": [{"id": "o1", "label": "Gwei", "correct": False, "feedback": "Ethereum's."},
+                     {"id": "o2", "label": "Lamport", "correct": True, "feedback": "Right."},
+                     {"id": "o3", "label": "Satoshi", "correct": False, "feedback": "Bitcoin's."},
+                     {"id": "o4", "label": "Wei", "correct": False, "feedback": "Ethereum's."}],
          "explanation": "One SOL is 1e9 lamports."}]}]
     check(not check_briefs(qg)["hard"], "good quiz_blocks -> briefs clean")
     # single-select with two correct is HARD
@@ -1090,39 +1126,113 @@ def selftest() -> int:
     q3 = copy.deepcopy(qg)
     q3["lessons"][0]["brief"]["quiz_blocks"][0]["questions"][0]["options"][0].pop("id")
     check(check_briefs(q3)["hard"], "quiz option with no id -> briefs HARD")
-    # only 2 options is an advisory (published courses use 3)
-    q4 = copy.deepcopy(qg)
-    q4["lessons"][0]["brief"]["quiz_blocks"][0]["questions"][0]["options"].pop()
-    check(any("only 2 options" in f for f in check_briefs(q4)["flags"])
-          and not check_briefs(q4)["hard"], "2-option question -> advisory, not HARD")
+    # course-wide policy is check_quiz's job, never check_briefs'
+    check(not any("option" in f and "4" in f for f in check_briefs(qg)["flags"]),
+          "check_briefs no longer duplicates the course-wide option-count policy")
 
-    # course-wide answer-position skew: all-correct-at-slot-1 is HARD once n ≥ 6
-    def _q(qid, correct_at):
-        opts = [{"id": oid, "label": f"opt {oid}", "correct": i == correct_at,
-                 **({} if i == correct_at else {"feedback": "no"})}
-                for i, oid in enumerate("abc")]
-        return {"id": qid, "prompt": f"{qid}?", "options": opts, "explanation": "e"}
-    sk = _good_manifest()
-    sk["lessons"][0]["brief"]["quiz_blocks"] = [{"questions": [_q(f"q{i}", 0) for i in range(6)]}]
-    check(any("position-skewed" in f for f in check_briefs(sk)["flags"]),
-          "6 questions all correct at position 1 -> skew HARD")
-    sk["lessons"][0]["brief"]["quiz_blocks"] = [{"questions": [_q(f"q{i}", i % 3) for i in range(6)]}]
-    check(not any("position-skewed" in f for f in check_briefs(sk)["flags"]),
-          "even correct-position spread -> no skew flag")
-    # below the sample floor the skew gate stays quiet
-    sk["lessons"][0]["brief"]["quiz_blocks"] = [{"questions": [_q(f"q{i}", 0) for i in range(5)]}]
-    check(not any("position-skewed" in f for f in check_briefs(sk)["flags"]),
-          "5 questions -> under sample floor, no skew flag")
-    # longest-label tell is advisory
-    lt = _good_manifest()
-    lqs = []
-    for i in range(7):
-        qq = _q(f"q{i}", i % 3)
-        qq["options"][i % 3]["label"] = "a much longer and more detailed correct answer label"
-        lqs.append(qq)
-    lt["lessons"][0]["brief"]["quiz_blocks"] = [{"questions": lqs}]
-    check(any("longest label" in f for f in check_briefs(lt)["flags"]),
-          "correct-is-always-longest -> advisory")
+    # ── the three quiz regression fixtures (the point of this whole workstream) ──
+    # A shared question factory: 5 options, parallel labels whose LENGTH does not
+    # depend on which one is correct, feedback everywhere, an explanation.
+    import hashlib as _hl
+
+    def _qz(qid, correct_at, k=5):
+        base = ("the runtime charges rent-exempt lamports against the payer at creation "
+                "and refunds them when the account closes")
+        opts = []
+        for i in range(k):
+            n = 76 + int(_hl.sha256(f"{qid}|{i}".encode()).hexdigest(), 16) % 34
+            opts.append({"id": f"o{i + 1}", "label": base[:n], "correct": i == correct_at,
+                         "feedback": "why this option lands where it does"})
+        return {"id": qid, "prompt": f"{qid}: which account pays the rent here?",
+                "multiSelect": False, "options": opts,
+                "explanation": "a paragraph that teaches the point after answering"}
+
+    def _course_with(seq):
+        """A 2-module manifest carrying `seq` as its single-select key positions."""
+        mm = _good_manifest()
+        per = 3
+        blocks = [[], []]
+        for i, pos in enumerate(seq):
+            blocks[(i // per) % 2].append(_qz(f"q{i}", pos))
+        for li in (0, 1):
+            mm["lessons"][li]["brief"]["quiz_blocks"] = [{"key": "check", "questions": blocks[li]}]
+            mm["lessons"][li]["research"] = {"claims": []}
+        return mm
+
+    ROT = [i % 3 for i in range(60)]        # the exact `mi % 3` artifact that shipped
+    ONE = [0] * 60                          # the all-'A' failure the old gate was built for
+    HASH = [int(_hl.sha256(f"fx|{i}".encode()).hexdigest(), 16) % 5 for i in range(60)]
+
+    rot = check_quiz(_course_with(ROT))
+    check(rot["hard"], "FIXTURE 1: a perfect a->b->c rotation -> quiz HARD")
+    check(any("sequence" in f and f.startswith(HARD) for f in rot["flags"]),
+          "FIXTURE 1: it fails on sequential exploitability (the old gate PASSED it)")
+    one = check_quiz(_course_with(ONE))
+    check(one["hard"], "FIXTURE 2: an all-one-slot sequence -> quiz HARD")
+    check(any("marginal" in f and f.startswith(HARD) for f in one["flags"]),
+          "FIXTURE 2: it fails on the marginal")
+    hsh = check_quiz(_course_with(HASH))
+    check(not hsh["hard"], "FIXTURE 3: a hash-balanced sequence -> quiz clean\n     "
+          + "\n     ".join(f for f in hsh["flags"] if f.startswith(HARD)))
+
+    # promotions to HARD (all four were advisory or absent before 2026-09-07)
+    lg = _course_with(HASH)
+    for blk in (lg["lessons"][0]["brief"]["quiz_blocks"][0]["questions"]
+                + lg["lessons"][1]["brief"]["quiz_blocks"][0]["questions"]):
+        for o in blk["options"]:
+            if o["correct"]:
+                o["label"] = o["label"] + " and a further clarifying clause that runs on"
+            else:
+                o["label"] = o["label"][:70]
+    check(any("longest-correct" in f and f.startswith(HARD) for f in check_quiz(lg)["flags"]),
+          "correct-is-longest -> HARD (was advisory; 4 courses shipped at 91-97% with GATE: PASS)")
+    nf = _course_with(HASH)
+    nf["lessons"][0]["brief"]["quiz_blocks"][0]["questions"][0]["options"][0].pop("feedback")
+    check(any("quiz feedback" in f and f.startswith(HARD) for f in check_quiz(nf)["flags"]),
+          "an option with no feedback -> HARD (every option, correct one included)")
+    ne = _course_with(HASH)
+    ne["lessons"][0]["brief"]["quiz_blocks"][0]["questions"][0].pop("explanation")
+    check(any("quiz explanation" in f and f.startswith(HARD) for f in check_quiz(ne)["flags"]),
+          "a question with no explanation -> HARD")
+    fo = _course_with(HASH)
+    for q in fo["lessons"][0]["brief"]["quiz_blocks"][0]["questions"]:
+        q["options"] = q["options"][:3]
+    check(any("option-count" in f and f.startswith(HARD) for f in check_quiz(fo)["flags"]),
+          "fewer than 4 options -> HARD")
+    ed = _course_with(HASH)
+    ed["lessons"][0]["brief"]["quiz_blocks"][0]["questions"][0]["prompt"] = "an — em-dash"
+    check(any("em-dash" in f and f.startswith(HARD) for f in check_quiz(ed)["flags"]),
+          "an em-dash in quiz text -> HARD (794 ship across six courses today)")
+
+    # the small-sample rule: under the floor a metric says so, it never passes quietly
+    tiny = _good_manifest()
+    tiny["lessons"][0]["brief"]["quiz_blocks"] = [{"key": "check",
+                                                   "questions": [_qz("q1", 0), _qz("q2", 0)]}]
+    tf = check_quiz(tiny)["flags"]
+    check(any("INCONCLUSIVE, not passed" in f for f in tf),
+          "under the sample floor -> INCONCLUSIVE, not a silent pass (the old gate returned [])")
+    check(all("Cannot rule out:" in f for f in tf if "INCONCLUSIVE" in f),
+          "each INCONCLUSIVE names what it could not rule out")
+
+    # the layout ledger: absent is advisory, drifted is HARD
+    import quiz_layout as _ql
+    lm = _course_with(HASH)
+    check(any("layout" in f and f.startswith(ADV) for f in check_quiz(lm)["flags"]),
+          "no layout ledger -> advisory (the course has not been permuted yet)")
+    _ql.permute(lm, "fixture-salt")
+    check(not any("layout" in f for f in check_quiz(lm)["flags"]),
+          "after permute the ledger verifies clean")
+    lm["lessons"][0]["brief"]["quiz_blocks"][0]["questions"][0]["options"].reverse()
+    check(any("layout" in f and f.startswith(HARD) for f in check_quiz(lm)["flags"]),
+          "hand-ordering after the permute -> HARD")
+
+    # standalone *.quiz.yaml is HARD (lints green, then the compiler drops it)
+    with tempfile.TemporaryDirectory() as tq:
+        check(not check_quiz_files(tq)["hard"], "no standalone quiz files -> clean")
+        qd = _P(tq) / "lessons" / "intro"
+        qd.mkdir(parents=True)
+        (qd / "check.quiz.yaml").write_text("questions: []\n", "utf-8")
+        check(check_quiz_files(tq)["hard"], "a standalone *.quiz.yaml -> quiz-files HARD")
 
     # a good coding_challenge SPEC keeps briefs clean (file existence checked separately)
     cg2 = _good_manifest()
@@ -1186,6 +1296,10 @@ def main(argv=None) -> int:
         _print(res)
         any_hard = any_hard or res["hard"]
     course_dir = getattr(a, "course", None)
+    if course_dir and a.cmd in ("quiz", "all"):
+        res = check_quiz_files(course_dir)
+        _print(res)
+        any_hard = any_hard or res["hard"]
     if course_dir and a.cmd in ("drafts", "all"):
         res = check_drafts(course_dir, m)
         _print(res)
