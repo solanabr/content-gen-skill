@@ -51,7 +51,7 @@ tool cannot see them).
 | Briefs don't parrot the docs' worked exemplar (the PDA/'no mappings' lesson) | JUDGE | agent / human read |
 | Course opens with a motivate lesson that puts code in hands fast; closes with a conclusion | JUDGE (+ADVISORY in validator) | agent / human read |
 | Draft carries the scaled visual floor (max(2, ceil(words/600))), all PARSING; fences clean; no prose wall >700w; do-element in the first 300w (opener 150) | HARD | `validate_course.py drafts` |
-| Verified claims cite a kit surface; artifact accretion edges run forward | HARD | `validate_course.py research` / `artifacts` |
+| Every lesson carries a research scaffold; verified claims cite a kit surface; artifact accretion edges run forward | HARD | `validate_course.py research` / `artifacts` |
 | No corpus signature in briefs or drafts | HARD | blocklist grep (`corpus-signatures.txt`) |
 | Alt text could stand in for the visual; visual types show two kinds of thinking | JUDGE (+shape ADVISORY) | agent / human read |
 | Pace fits 2026 attention: payoff/empowerment beat every few paragraphs | JUDGE | agent / human read |
@@ -117,6 +117,45 @@ guest-only jobs) — the agent confirms or re-tags.
 - Briefs with no `dominant_job` / no trade-off → fill them; they're the voice handoff.
 - 60-day course no one finishes → cut to the outcome; tight beats exhaustive.
 
+
+## Assessment layer — artifacts gate, quizzes check
+
+Two different jobs, and conflating them is how a course ends up with neither.
+
+**Artifacts gate.** Every check that decides whether a learner has the skill is artifact-based:
+build, deploy, exploit, inspect, pass the test. `forms/course.md` §Structure recipe says "never
+MCQs", and that is right *about gating* — the corpus has zero quizzes and no autograded MCQ has
+ever gated a lesson here.
+
+**Quizzes check.** A quiz is a formative retrieval beat inside the lesson: immediate per-option
+feedback, no XP, no gate (`design-spine.md` §6.1). The corpus having zero quizzes is a **gap**, not
+a rule — spaced retrieval is the corpus-wide weakness the spine's checkpoints exist to fix. Every
+lesson earns one, including Bitcoin, EVM and CLI lessons where no code block is possible.
+
+| Non-negotiable | Enforcement | Where |
+|---|---|---|
+| Option order is COMPUTED from a hash and recorded in a layout ledger; the ledger verifies | HARD | `validate_course.py quiz` + `tools/quiz_layout.py` |
+| Answer key not exploitable: order-1/order-2 Markov accuracy vs a permutation null | HARD | `validate_course.py quiz` |
+| Slot-repeat rate consistent with chance — **two-sided**, so never-repeats fails too | HARD | `validate_course.py quiz` |
+| Key position + key length RANK uniform per option-count stratum, and not TOO uniform | HARD | `validate_course.py quiz` |
+| No content-blind strategy beats chance (longest / shortest / only-hedged / no-absolute / prompt-overlap / least-like-the-others) | HARD | `validate_course.py quiz` |
+| ≥4 options; exactly 5 when the mean label is ≤70 chars; multiSelect floors at 5 with 2 ≤ correct ≤ k−2 | HARD | `validate_course.py quiz` |
+| `feedback` on EVERY option including the correct one; `explanation` on every question | HARD | `validate_course.py quiz` |
+| No em-dashes anywhere in quiz text | HARD | `validate_course.py quiz` |
+| Quizzes emitted INLINE in `lesson.yaml`; no standalone `*.quiz.yaml` | HARD | `validate_course.py quiz` (course-dir scan) |
+| Any metric under its sample floor reports INCONCLUSIVE, not passed | HARD (by construction) | `tools/quiz_metrics.py` |
+| Distractors are REAL misconceptions a learner of this lesson would hold, not near-misses invented to fill a slot | JUDGE | agent / human read |
+| The prompt is a scenario tied to something the learner just ran, not a definition lookup | JUDGE | agent / human read |
+| The correct option's `feedback` names the distinction, rather than saying "correct" | JUDGE | agent / human read |
+| A multiSelect question is set-valued because the subject matter is, never to add difficulty | JUDGE | agent / human read |
+| The quiz checks the lesson's ONE new element, not trivia from its color beats | JUDGE | agent / human read |
+| No question is answerable from the lesson TITLE alone | JUDGE (+ answer-leak ADVISORY) | agent / human read |
+
+**The law behind the HARD rows:** *when a statistical property must hold, compute it in a tool;
+never ask for it in a prompt.* The previous gate HARD-failed ">50% of keys in one slot" and the
+generator was told to satisfy it by rotating the key a→b→c per module. The marginal came out
+perfect and the sequence came out 85-94% predictable. A stronger instruction produces a different
+artifact, not randomness.
 
 ## Review-hardening JUDGE rows (added from the course review)
 

@@ -131,7 +131,7 @@ def cmd_merge(course: Path) -> int:
     return 0
 
 
-def _selftest() -> int:
+def selftest() -> int:
     ok = True
 
     def chk(c, msg):
@@ -201,7 +201,7 @@ def main() -> int:
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
-        return _selftest()
+        return selftest()
     if not a.cmd or not a.course:
         ap.print_help()
         return 2

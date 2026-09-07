@@ -98,12 +98,23 @@ whether it MUST ground against live sources.
     (Scope & deliverable above), one lesson at a time; run the visual pass on each
     draft; update `_state.yaml`. In `brief-only` mode, stop after the handoff
     packet and note the human accuracy gate.
-13. **(Optional) Interactive plugins + Academy publish.** For platform-bound courses, author
-    per-lesson `quiz_blocks` and (Rust/TS lessons) `coding_challenges` in the manifest briefs
-    (lesson-brief-schema §H — vary correct-answer positions; the validator hard-fails one-slot
-    skew), then project to the Academy publish tree and prove the challenge contract:
+13. **Interactive plugins + Academy publish.** Author per-lesson `quiz_blocks` and (Rust/TS lessons)
+    `coding_challenges` in the manifest briefs (lesson-brief-schema §H). **Do not think about option
+    order — a tool assigns it; hand-ordering is a gate failure.** Write each question's options in
+    whatever order they occur to you, then run the quiz pipeline in exactly this sequence
+    (`quiz_edit.py merge` refuses any file whose option order moved, so permutation is the LAST
+    mutation before validation):
     ```bash
-    python3 "$SKILL/tools/validate_course.py" all --course content/courses/<id>   # quiz (incl. answer spread) + challenge checks
+    #   optional: fan a label/feedback rewrite over one editor per lesson
+    python3 "$SKILL/tools/quiz_edit.py"   split content/courses/<id>  # → lessons/quizzes/*.json
+    #   ... edit labels/feedback/explanations ONLY; ids, block keys, correctness and order are refused
+    python3 "$SKILL/tools/quiz_edit.py"   merge content/courses/<id>
+    python3 "$SKILL/tools/quiz_layout.py" permute --course content/courses/<id>  # hash-assigns order + ledger
+    python3 "$SKILL/tools/quiz_layout.py" report  --course content/courses/<id>  # stats + ledger + length gaps
+    ```
+    Then project to the Academy publish tree and prove the challenge contract:
+    ```bash
+    python3 "$SKILL/tools/validate_course.py" all --course content/courses/<id>   # quiz + challenge checks
     python3 "$SKILL/tools/render_visuals.py" scaffold-banner content/courses/<id> # course banner → Academy thumbnail
     #   ... author branding/banner.html (references/banner.md), then:
     python3 "$SKILL/tools/render_visuals.py" render-banner   content/courses/<id> # → branding/banner.webp (≤1MiB)
@@ -149,11 +160,31 @@ python3 "$SKILL/tools/validate_course.py" all --course content/courses/<id>  # d
 python3 "$SKILL/tools/scaffold_course.py" emit --manifest m.json --out content/courses/<id>
 ```
 
-- `tools/validate_course.py` — `dag | briefs | ladder | capstone | outcomes | drafts | all`
-  (`drafts` HARD-enforces the ≥2-visuals-per-lesson floor on written lessons).
-  HARD = breaks the DAG walk or the writer handoff; ADVISORY = a smell to weigh.
+- `tools/validate_course.py` — `dag | briefs | quiz | ladder | capstone | outcomes | research |
+  artifacts | length | drafts | challenges | all` (`drafts` HARD-enforces the scaled visuals floor;
+  `quiz` is the whole-course quiz gate). HARD = breaks the DAG walk or the writer handoff;
+  ADVISORY = a smell to weigh. A statistical metric under its sample floor says
+  **INCONCLUSIVE, not passed**, and never green-lights a course by staying quiet.
 - `tools/scaffold_course.py` — `emit` (idempotent; `--force`), `check` (dry-run). Honors
   human edits via `course.lock.json` hash drift.
+- `tools/assemble_manifest.py` — the other half of the brief fan-out: `scaffold_course.py` splits a
+  manifest into per-lesson work, this folds the fragments back into one `manifest.json`. Exits 2 with
+  `ASSEMBLE-FAIL` on a missing, extra, or duplicated lesson rather than quietly assembling a short
+  course. 17-check selftest.
+- `tools/quiz_metrics.py` — the statistics behind the quiz gate, stdlib-only and importable, so
+  `validate_course.py quiz` and `quiz_layout.py report` can never disagree about a number. A port of
+  `academy-courses/scripts/quiz_stats.py`, with which it must stay in agreement. Every test is
+  two-sided: a key that *never* repeats its slot fails exactly as hard as one that always does.
+- `tools/quiz_layout.py` — `permute | verify | report`. Option order is derived from
+  `sha256(salt | courseId | lessonSlug | blockKey | questionId)` and recorded in a **layout ledger**
+  in the manifest, so `verify` is a byte-comparison — provenance, not statistics, and therefore
+  conclusive at n=1 where every distributional test is powerless. It touches array order and nothing
+  else, asserting that by comparing the option multiset before and after, which makes it safe on an
+  already-translated course. **This is where option order comes from; never a prompt, never a hand.**
+- `tools/quiz_edit.py` — `split | merge`: a per-lesson editing seam over `manifest.json`'s
+  `quiz_blocks`, so a fan-out of editors does not race on one file. `merge` refuses any file whose
+  block key, question id, option id, `correct` flag, `multiSelect` flag, or option ORDER moved —
+  wording is the only thing an editor may change. Run it BEFORE `quiz_layout.py permute`.
 - `tools/dedash.py` — strips em-dashes (the top AI tell) from drafts, deterministically:
   commas in prose/visual specs, hyphens in code comments, code/output fences protected.
   Run it as the final step of the writing pass; `validate_course.py drafts` HARD-fails
@@ -212,6 +243,25 @@ python3 "$SKILL/tools/scaffold_course.py" emit --manifest m.json --out content/c
 - agent `content-composer` — owns the non-course forms (route → brief → write →
   visual pass).
 - agent `course-architect` — owns the course form (intake → emit → lesson writing).
+
+## Method notes
+
+How a wave was actually run, lifted out of the one-off scripts that ran it. Load a
+file only when you are doing that job.
+
+| `method/` | Covers |
+|---|---|
+| **`known-failure-modes.md`** | **Read first.** The failures that recur across waves — the substring-vs-real-usage law (a grep for a tool name flags "forgets" and "byte cast"), and **SKIP is not PASS**. |
+| `brief-fanout.md` | One agent per module writing lesson briefs, then `assemble_manifest.py` folding them back. |
+| `lesson-writing.md` | Working the queue one lesson at a time through the voice seam. |
+| `quiz-authoring.md` | Writing the questions. Option order is not in it — that is `tools/quiz_layout.py`'s job, deliberately. |
+| `review-boards.md` | The adversarial review passes and what each board owns. |
+| `wave-orchestration.md` | Running several courses at once without them colliding. |
+| `pattern-authoring.md` | Adding a pattern to `patterns/`. |
+| `router-hardening.md` | Changing `routing/ROUTING.md` without breaking existing routes. |
+
+Optional runners for these live in `workflows/*.wf.js`. The method files are the
+source of truth; a runner is one way to execute one, never the specification.
 
 ## The one rule above all
 **Route the form, design backward from a measurable outcome, ground every claim,

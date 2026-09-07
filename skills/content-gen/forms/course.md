@@ -110,11 +110,16 @@ measurably better, not adjacent.
 - **Proof-escalation ladder** — within exercises: in-process SVM test (LiteSVM/
   Mollusk) → localnet + demo script → devnet deploy, with `solana program close`
   rent hygiene baked in. A real on-chain moment, no autograder to maintain.
-- **Practice shape** — distributed per-unit tasks converging on one integrative
-  capstone; every check artifact-based (build/deploy/exploit/inspect), **never
-  MCQs** (zero real quizzes across the corpus). Spaced retrieval is the corpus-wide
-  gap — the spine's retrieval checkpoints (`../design-spine.md` §9) are the edge;
-  keep them.
+- **Practice shape — artifacts gate, quizzes check.** Distributed per-unit tasks
+  converging on one integrative capstone. Every **gate** is artifact-based
+  (build/deploy/exploit/inspect) and **no MCQ ever gates a lesson** — the corpus
+  agrees; nothing in it is gated on a quiz. But the corpus having zero quizzes *at
+  all* is a gap, not a rule: spaced retrieval is its worst weakness, and the spine's
+  retrieval checkpoints (`../design-spine.md` §9) are the edge. So every lesson also
+  carries a formative quiz (`quiz_blocks`, `../lesson-brief-schema.md` §H) that gives
+  per-option feedback and awards nothing. The distinction is the point: a quiz that
+  gated would have to be unguessable to be fair, and a quiz that only checks still
+  has to be honest — which is why `validate_course.py quiz` measures it either way.
 - **Security tier** — late, offense-first (exploit → patch → re-test), assessed by
   making the learner *write the exploit* ("green test = you broke it") or fuzz.
   Gate behind build fluency; inline Footguns earlier.
@@ -143,6 +148,10 @@ build|concept`); the deterministic gate and emission per `../SKILL.md` steps 11�
 - [ ] Fundamentals ordering chosen deliberately and named in `course.yaml` notes.
 - [ ] Every rung has an interim check — no capstone-only practice (a learner must
       not be able to watch three builds and hit the capstone cold).
+- [ ] Every lesson carries a formative quiz; option order was assigned by
+      `tools/quiz_layout.py permute` (never by hand) and `validate_course.py quiz`
+      is clean, with no metric sitting at INCONCLUSIVE that a few more questions
+      would resolve.
 - [ ] No honor-system gates where proof-of-mastery is a stated feature.
 - [ ] Toolchain explicit (framework, harness, cluster) and versions pinned once.
 - [ ] No stub lessons — every emitted lesson is self-contained without a video.
@@ -152,6 +161,17 @@ build|concept`); the deterministic gate and emission per `../SKILL.md` steps 11�
 
 These are non-negotiable and mostly machine-enforced; the JUDGE ones are read by the reviewer.
 
+- **When a statistical property must hold, COMPUTE IT IN A TOOL. Never ask for it in
+  a prompt.** A stronger instruction produces a different artifact, not randomness.
+  The worked example is the quiz answer key. The gate HARD-failed ">50% of keys in
+  one slot", so the wave-2 generator was told to seed each module's first answer at
+  `module_index % 3` and rotate forward. It complied perfectly: every wave-2 course
+  is near-perfectly balanced on the marginal the gate measured, and 85-94%
+  predictable on the sequence it did not. Nine of ten courses passed. Option order
+  is now assigned by `tools/quiz_layout.py permute` from a hash and recorded in a
+  ledger; hand-ordering is a gate failure. Apply the same test to any new rule you
+  are tempted to write into a prompt: if a script could check it, a script should
+  produce it.
 - **No editor/agent scaffolding in a draft.** A lesson opens on its `#` H1 title; any
   text above it ("Returning the fixed lesson:", "I've identified…") is leaked agent
   reasoning. HARD: `validate_course.py drafts` fails a draft that does not open on H1.

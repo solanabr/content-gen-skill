@@ -84,19 +84,22 @@ lesson:
   color:                 # 1-3 grounded trivia/history beats to weave in (named incidents, dated numbers) — never invented
   est_length:            # THE length contract — the writer writes to this number. Course lessons: ~3000-4500w (keystone topics higher). Validator flags targets below 3000.
   # ── OPTIONAL Academy plugins (additive; see §H and references/academy-schema.md) ──
-  quiz_blocks:           # OPTIONAL: formative checks. A list of Academy quiz BLOCKS (each becomes one `type: quiz` block on export). Never gates the lesson.
+  quiz_blocks:           # OPTIONAL: formative checks. A list of Academy quiz BLOCKS (each becomes one `type: quiz` block INLINE in lesson.yaml on export — never a standalone *.quiz.yaml). Never gates the lesson.
     - key:               #   kebab block key (e.g. check). Optional; defaults to check / check-N.
       questions:
-        - id:            #   stable; correctness is keyed to this id, never option order
+        - id:            #   stable; correctness is keyed to this id, never option order. NEVER renamed after authoring.
           prompt:
-          multiSelect:   #   default false → exactly ONE correct option; true → ≥1
-          options:       #   3 preferred (≥2 min); each {id, label, correct}; put `feedback` on every WRONG option
-            - {id: a, label: "...", correct: false, feedback: "why it's wrong"}
-            - {id: b, label: "...", correct: true}
-            - {id: c, label: "...", correct: false, feedback: "why it's wrong"}
-          #   VARY the correct slot question to question — the validator HARD-fails a course
-          #   where >50% of correct answers share one position (the all-'A' failure)
-          explanation:   #   shown after answering — the paragraph that teaches the point
+          multiSelect:   #   default false → exactly ONE correct option. true only where the honest answer is a SET; then ≥5 options and 2 ≤ correct ≤ k-2.
+          options:       #   ≥4, and exactly 5 when the mean label is ≤70 chars. Opaque ids o1…o5. `feedback` on EVERY option, the correct one included.
+            - {id: o1, label: "...", correct: false, feedback: "why this one misses"}
+            - {id: o2, label: "...", correct: true,  feedback: "why this one is right"}
+            - {id: o3, label: "...", correct: false, feedback: "why this one misses"}
+            - {id: o4, label: "...", correct: false, feedback: "why this one misses"}
+            - {id: o5, label: "...", correct: false, feedback: "why this one misses"}
+          #   DO NOT THINK ABOUT OPTION ORDER. Write the options in whatever order they occur
+          #   to you; `tools/quiz_layout.py permute` assigns the final order from a hash and
+          #   records it in a ledger. Hand-ordering is a gate failure (validate_course.py quiz).
+          explanation:   #   REQUIRED. Shown after answering — the paragraph that teaches the point.
   coding_challenges:     # OPTIONAL: runnable exercises. Only for rust|typescript (the Academy runner compiles ONLY these). Bitcoin/CLI/Python/Solidity lessons take quizzes, not code blocks.
     - id:                #   kebab; becomes the exercise dir name on export
       language:          #   rust | typescript
@@ -231,14 +234,34 @@ publishable Academy course; `tools/validate_course.py` validates the specs (`che
 `check_challenges`); `tools/verify_challenges.py` proves the runtime contract.
 
 - **Quizzes are formative — they never gate.** Only `assessment` gates the lesson (design-spine §6/§6.1).
-  A quiz checks understanding and gives immediate per-option feedback. `multiSelect:false` ⇒ exactly one
-  `correct`; put `feedback` on every wrong option and a teaching `explanation` on every question. Quizzes
-  are language-agnostic — a Bitcoin, EVM, or CLI lesson still earns one.
-  **Quality bar** (references/academy-schema.md §Quiz): scenario-driven, often two-part prompts tied to
-  what the learner just did; 3 options; distractors are REAL plausible misconceptions written in the same
-  length and register as the answer (never joke options, never a giveaway-long correct label); and the
-  correct answer's position varies roughly evenly across the course — `validate_course.py` HARD-fails
-  >50% one-slot skew and flags a correct-is-always-longest pattern.
+  **Artifacts gate; quizzes check.** A quiz gives immediate per-option feedback on understanding and
+  awards nothing. Quizzes are language-agnostic — a Bitcoin, EVM, or CLI lesson still earns one.
+  **Emit them INLINE**: a `quiz_blocks` entry becomes a `type: quiz` block inside `lesson.yaml`. A
+  standalone `*.quiz.yaml` lints green and is then silently dropped by the platform compiler, so the
+  lesson ships with no check and nothing reports it. `validate_course.py quiz` HARD-fails one.
+- **The authoring policy** (all HARD in `validate_course.py quiz`; full rationale in
+  references/academy-schema.md §Quiz):
+  - **≥4 options, and exactly 5 when the mean option label is ≤70 characters.** Short labels are cheap;
+    a 3-option question with one-line options is close to a coin flip.
+  - **`multiSelect: true` wherever the honest answer is a set.** No cap and no quota — but never convert
+    a single-answer question to multiSelect just to add difficulty. Its floor is 5 options with
+    2 ≤ correct ≤ k−2, so neither "all of them" nor "exactly one" is a guess that works.
+  - **`feedback` on EVERY option, the correct one included**, and an `explanation` on every question.
+    The correct option's feedback is where the "yes, and here is why that is the distinction" lands.
+  - **Opaque ids `o1…o5`**, so nothing implies id order is display order. Ids are NEVER renamed after
+    authoring: correctness, translations, and the layout ledger all bind on them.
+  - **Distractors are REAL misconceptions**, parallel to the answer in length and register. Never joke
+    options, never a giveaway-long correct label: the gate scores a content-blind learner's actual
+    strategies (longest, shortest, only-hedged, only-one-without-an-absolute, most-prompt-overlap) and
+    HARD-fails any that beats chance.
+- **DO NOT THINK ABOUT OPTION ORDER.** Write the options in whatever order they occur to you.
+  `tools/quiz_layout.py permute` assigns the final order from
+  `sha256(salt | courseId | lessonSlug | blockKey | questionId)` and records it in a ledger;
+  `validate_course.py quiz` HARD-fails a ledger that drifted. Hand-ordering is a gate failure.
+  This is the branch's governing law: **when a statistical property must hold, compute it in a tool;
+  never ask for it in a prompt.** The previous version of this section asked authors to "vary the
+  correct slot", and the wave-2 generator turned that into a per-lesson a→b→c rotation whose marginal
+  was perfect and whose *sequence* was 85-94% predictable.
 - **Coding challenges are runnable and RUST/TYPESCRIPT ONLY** (the Academy sandbox compiles only these).
   Author them where the lesson's real code is client-side Solana TS or a Rust/Anchor program. The **starter
   must fail** its tests and the **solution must pass** — that contract is the grade, so keep the solution
