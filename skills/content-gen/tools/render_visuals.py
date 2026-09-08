@@ -616,6 +616,7 @@ def cmd_banner(course_dir: Path | None, src: str | None = None, out: str | None 
         return 2
 
     im = Image.open(art).convert("RGB")
+    src_size = im.size
     small = im.width < CANVAS[0] or im.height < CANVAS[1]
     im = _cover_crop(im, CANVAS)
     note = "no logo"
@@ -648,8 +649,8 @@ def cmd_banner(course_dir: Path | None, src: str | None = None, out: str | None 
     size = shipped.stat().st_size
     print(f"banner: {art.name} -> {shipped} {size // 1024}KB via {meth} · {note}"
           f" [1MiB cap: {'PASS' if size <= _BANNER_CAP else 'FAIL'}]"
-          + (f"\n  note: {art.name} is {Image.open(art).size[0]}x{Image.open(art).size[1]}, "
-             f"smaller than {CANVAS[0]}x{CANVAS[1]} — it was upscaled" if small else ""))
+          + (f"\n  note: {art.name} is {src_size[0]}x{src_size[1]}, smaller than "
+             f"{CANVAS[0]}x{CANVAS[1]} — it was upscaled" if small else ""))
     return 0 if size <= _BANNER_CAP else 1
 
 
