@@ -122,9 +122,8 @@ whether it MUST ground against live sources.
     Then project to the Academy publish tree and prove the challenge contract:
     ```bash
     python3 "$SKILL/tools/validate_course.py" all --course content/courses/<id>   # quiz + challenge checks
-    python3 "$SKILL/tools/render_visuals.py" scaffold-banner content/courses/<id> # course banner → Academy thumbnail
-    #   ... author branding/banner.html (references/banner.md), then:
-    python3 "$SKILL/tools/render_visuals.py" render-banner   content/courses/<id> # → branding/banner.webp (≤1MiB)
+    #   ... drop the course art at branding/banner-bg.png (references/banner.md), then:
+    python3 "$SKILL/tools/render_visuals.py" banner content/courses/<id>          # → branding/banner.webp (≤1MiB)
     python3 "$SKILL/tools/fact_freshness.py" stale --course content/courses/<id>  # BLOCKING: no fact past its TTL
     python3 "$SKILL/tools/academy_export.py" emit --course content/courses/<id> --out content/academy/courses/<slug>
     python3 "$SKILL/tools/verify_challenges.py" content/courses/<id>              # starter fails / solution passes
@@ -240,9 +239,11 @@ python3 "$SKILL/tools/scaffold_course.py" emit --manifest m.json --out content/c
   overflows the 1600×900 canvas; `review` adds a static QA (page-overflow + forbidden-CSS lint)
   that pairs with the fresh-eyes visual pass in `references/visual-review.md`. Deterministic, no
   browser; SKIP if WeasyPrint/rasterizer absent. Additive — the ` ```visual ` spec stays in the
-  markdown; the PNG is written beside the lesson. `scaffold-banner` / `render-banner` produce the
-  one course-level visual — the Academy card thumbnail — in `branding/` (photo-backdrop or
-  pure-brand; `references/banner.md`).
+  markdown; the PNG is written beside the lesson. `banner` produces the one course-level visual —
+  the Academy card thumbnail — from `branding/banner-bg.*`: the art cover-cropped to 1600×900 with
+  the Superteam mark composited top-right and nothing else, Pillow only, no title burned in (the
+  card prints it from `course.yaml`). `scaffold-banner` / `render-banner` are the legacy composed
+  title card, kept for courses already authored that way (`references/banner.md`).
 - `tools/fact_freshness.py` — `report | stale | probes`: **per-claim expiry.** Every
   `research.claims[]` entry carries `verified_on` and inherits a TTL from its `kind`
   (`course_lib.TTL_DAYS`: on-chain numbers 14d, CLI defaults / version pins / protocol

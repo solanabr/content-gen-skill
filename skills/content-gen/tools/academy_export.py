@@ -306,7 +306,7 @@ def plan_academy(course_dir: Path, cfg: dict, m: dict,
     if banner:
         if banner.stat().st_size > (1 << 20):
             warnings.append(f"branding/{banner.name}: {banner.stat().st_size} bytes exceeds "
-                            f"the 1 MiB upstream asset cap — re-run render_visuals.py render-banner")
+                            f"the 1 MiB upstream asset cap — re-run render_visuals.py banner")
         copies.append((str(banner.resolve()), f"assets/{banner.name}"))
         course_doc.setdefault("thumbnail", f"assets/{banner.name}")  # academy block wins
         for extra in ("banner.html", "logo.svg"):

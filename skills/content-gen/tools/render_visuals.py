@@ -15,8 +15,9 @@ does the creative HTML authoring in between.
     #   ... agent fills each <asset>.html's .viz with on-brand markup ...
     render_visuals.py render   <course> [--dpi N]  # weasyprint -> PDF -> PNG (SKIP if absent)
     render_visuals.py check    <course>            # rendered vs unrendered report
-    render_visuals.py scaffold-banner <course>     # course banner starter -> branding/banner.html
-    render_visuals.py render-banner   <course>     # banner -> branding/banner.{png,webp} (<=1MiB)
+    render_visuals.py banner   <course>            # STANDARD banner -> branding/banner.webp
+    render_visuals.py scaffold-banner <course>     # LEGACY composed-banner starter
+    render_visuals.py render-banner   <course>     # LEGACY composed banner -> banner.{png,webp}
     render_visuals.py --selftest
 
 Assets land beside the lessons in `lessons/assets/<lesson-stem>/v<NN>-<type>.{html,pdf,png}`
@@ -24,11 +25,20 @@ Assets land beside the lessons in `lessons/assets/<lesson-stem>/v<NN>-<type>.{ht
 absent (install: `pip install weasyprint` + a rasterizer, or `pip install pymupdf`).
 
 The COURSE BANNER is the one course-level visual: the Academy card thumbnail
-(references/banner.md). It lives in `content/courses/<id>/branding/` — drop a
-`banner-bg.png` photo there for photo mode (blurred backdrop + cream title card;
-the blur is pre-baked via Pillow because WeasyPrint has no CSS blur), or scaffold
-without one for the pure-brand mode. academy_export.py ships `banner.webp` as the
-course `thumbnail:`.
+(references/banner.md). It lives in `content/courses/<id>/branding/`.
+
+  STANDARD (`banner`, since 2026-09): the course art, cover-cropped to 1600x900, with
+  the Superteam mark composited into the top-right corner and NOTHING else. Pillow only
+  — no WeasyPrint, no HTML to author, no title burned into the thumbnail (the Academy
+  card already prints the title beside the image, so a second copy inside it was
+  duplicated, and it was the part that went stale when a course was retitled).
+
+  LEGACY (`scaffold-banner` + `render-banner`): the composed title card — authored HTML
+  through WeasyPrint, cream card over a pre-blurred photo, title and level/lesson/XP
+  pills. Kept working for courses whose banner is already authored that way.
+
+Both write `branding/banner.webp` (1600x900, <=1 MiB), which academy_export.py ships as
+the course `thumbnail:`.
 """
 from __future__ import annotations
 import argparse
@@ -493,6 +503,161 @@ def _banner_paths(course_dir: Path) -> dict:
             "asset_id": f"{course_dir.name}/banner"}
 
 
+def _cover_crop(im, size: tuple[int, int]):
+    """Scale to cover `size`, then centre-crop: the canvas fills, the aspect never
+    distorts, and the subject stays centred."""
+    from PIL import Image
+    tw, th = size
+    scale = max(tw / im.width, th / im.height)
+    im = im.resize((max(tw, round(im.width * scale)), max(th, round(im.height * scale))),
+                   Image.LANCZOS)
+    left, top = (im.width - tw) // 2, (im.height - th) // 2
+    return im.crop((left, top, left + tw, top + th))
+
+
+# ---- the STANDARD banner: the art, plus the mark, top-right -------------------
+# House standard since 2026-09. The banner adds exactly ONE thing to the course art:
+# the Superteam horizontal mark in the top-right corner. No title, no pills, no scrim.
+# The Academy card already prints the title, level, lesson count and XP beside the
+# image from course.yaml, so burning a second copy into the thumbnail duplicated them
+# — and the burnt-in copy is the one that went stale when a course was retitled or
+# re-priced, because nothing recomputed it.
+#
+# Pillow only: no WeasyPrint, no rasterizer, no HTML to author. The legacy composed
+# banner further down needs all three, which is why this one is the default.
+
+_LOGO_DIR = SKILL / "brand" / "assets" / "logos"
+_LOGO_W = 0.17            # mark width, as a fraction of the canvas width
+_LOGO_MARGIN = 0.045      # inset from the top and right edges, same fraction
+_LOGO_LUMA = {"cream": (245, 232, 202), "dark": (27, 35, 29), "emerald": (0, 139, 76)}
+
+
+def _srgb_luma(rgb) -> float:
+    """WCAG relative luminance of an 8-bit sRGB triple."""
+    def lin(c):
+        c = c / 255.0
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (lin(c) for c in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast(a: float, b: float) -> float:
+    hi, lo = max(a, b), min(a, b)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _pick_logo_variant(im, box) -> tuple[str, float, float]:
+    """Which mark to composite: whichever has more contrast against the corner.
+
+    The corner's MEAN colour is a proxy — a mark over busy art has no single
+    background — but it is deterministic, it is reported in the output line, and
+    `--logo` overrides it whenever the eye disagrees.
+    """
+    from PIL import ImageStat
+    bg = _srgb_luma(ImageStat.Stat(im.crop(box).convert("RGB")).mean)
+    ranked = sorted(_LOGO_LUMA, key=lambda k: -_contrast(_srgb_luma(_LOGO_LUMA[k]), bg))
+    best = ranked[0]
+    return best, bg, _contrast(_srgb_luma(_LOGO_LUMA[best]), bg)
+
+
+def _logo_image(variant: str, width: int, logo_file: str | None = None):
+    """The Superteam horizontal mark as an RGBA image `width` px wide.
+
+    Shipped PNG first, which is what keeps this path Pillow-only; cairosvg second, for
+    a swapped-in SVG. There is no third rung — a banner that cannot load the mark FAILs
+    rather than shipping unbranded.
+    """
+    from PIL import Image
+    src = Path(logo_file) if logo_file else _LOGO_DIR / f"horizontal-{variant}.png"
+    if src.suffix.lower() == ".svg" or not src.is_file():
+        svg = src if src.suffix.lower() == ".svg" else src.with_suffix(".svg")
+        if not svg.is_file():
+            return None, f"no mark at {src}"
+        try:
+            import cairosvg
+        except ModuleNotFoundError:
+            return None, (f"{svg.name} is an SVG and cairosvg is absent — "
+                          "`pip install cairosvg`, or point --logo-file at a PNG")
+        import io
+        im = Image.open(io.BytesIO(cairosvg.svg2png(url=str(svg),
+                                                    output_width=width))).convert("RGBA")
+    else:
+        im = Image.open(src).convert("RGBA")
+    if im.width != width:
+        im = im.resize((width, max(1, round(im.height * width / im.width))), Image.LANCZOS)
+    return im, src.name
+
+
+def cmd_banner(course_dir: Path | None, src: str | None = None, out: str | None = None,
+               variant: str = "auto", logo_file: str | None = None, logo_w: float = _LOGO_W,
+               margin: float = _LOGO_MARGIN, no_logo: bool = False) -> int:
+    try:
+        from PIL import Image
+    except ModuleNotFoundError:
+        print("banner: SKIP - Pillow not installed (`pip install Pillow`)", file=sys.stderr)
+        return 0
+    art = Path(src) if src else (_banner_paths(course_dir)["bg"] if course_dir else None)
+    if art is None:
+        print("banner: FAIL no course art — drop branding/banner-bg.{png,jpg,jpeg,webp} "
+              "into the course, or pass --in <image>", file=sys.stderr)
+        return 2
+    if not art.is_file():
+        print(f"banner: FAIL no such image: {art}", file=sys.stderr)
+        return 2
+    if out:
+        webp = Path(out)
+        png = webp.with_suffix(".png")
+    elif course_dir is not None:
+        p = _banner_paths(course_dir)
+        p["dir"].mkdir(parents=True, exist_ok=True)
+        png, webp = p["png"], p["webp"]
+    else:
+        print("banner: FAIL pass a course dir or --out", file=sys.stderr)
+        return 2
+
+    im = Image.open(art).convert("RGB")
+    small = im.width < CANVAS[0] or im.height < CANVAS[1]
+    im = _cover_crop(im, CANVAS)
+    note = "no logo"
+    if not no_logo:
+        lw, m = max(1, round(CANVAS[0] * logo_w)), round(CANVAS[0] * margin)
+        logo, why = _logo_image("cream" if variant == "auto" else variant, lw, logo_file)
+        if logo is None:
+            print(f"banner: FAIL {why}", file=sys.stderr)
+            return 1
+        x, y = CANVAS[0] - m - logo.width, m
+        if variant == "auto" and not logo_file:      # a --logo-file has no variants to pick from
+            variant, bg_luma, ratio = _pick_logo_variant(im, (x, y, x + logo.width,
+                                                              y + logo.height))
+            note = f"logo {variant} (auto: corner luma {bg_luma:.2f}, contrast {ratio:.1f}:1)"
+            if variant != "cream":
+                logo, why = _logo_image(variant, lw, logo_file)
+                if logo is None:
+                    print(f"banner: FAIL {why}", file=sys.stderr)
+                    return 1
+        else:
+            note = f"logo {why}"
+        im = im.convert("RGBA")
+        im.alpha_composite(logo, (x, y))
+        im = im.convert("RGB")
+    im.save(png, "PNG")
+    shipped, meth = _compress_banner(png, webp)
+    if shipped is None:
+        print(f"banner: {png.name} rendered, but compression FAILED: {meth}")
+        return 1
+    size = shipped.stat().st_size
+    print(f"banner: {art.name} -> {shipped} {size // 1024}KB via {meth} · {note}"
+          f" [1MiB cap: {'PASS' if size <= _BANNER_CAP else 'FAIL'}]"
+          + (f"\n  note: {art.name} is {Image.open(art).size[0]}x{Image.open(art).size[1]}, "
+             f"smaller than {CANVAS[0]}x{CANVAS[1]} — it was upscaled" if small else ""))
+    return 0 if size <= _BANNER_CAP else 1
+
+
+# ---- LEGACY composed banner (title card through WeasyPrint) -------------------
+# Superseded by `banner` above, kept working for courses whose branding/banner.html is
+# already authored. Everything below this line — the starter, the pre-baked backdrop,
+# the forbidden-CSS lint — belongs to that path only.
+
 # The XP bolt as inline SVG — the ⚡ emoji is unreliable under WeasyPrint/Pango.
 _BOLT_SVG = ('<svg width="18" height="26" viewBox="0 0 16 24">'
              '<polygon points="9,0 0,14 6,14 5,24 16,9 9,9" fill="#1b231d"/></svg>')
@@ -623,12 +788,7 @@ def _prepare_banner_bg(p: dict, params: dict) -> tuple[bool, str]:
         from PIL import Image, ImageEnhance, ImageFilter
     except ModuleNotFoundError:
         return False, "Pillow not installed (`pip install Pillow`) — cannot bake the backdrop"
-    im = Image.open(p["bg"]).convert("RGB")
-    tw, th = CANVAS
-    scale = max(tw / im.width, th / im.height)           # cover-crop to the canvas aspect
-    im = im.resize((round(im.width * scale), round(im.height * scale)), Image.LANCZOS)
-    left, top = (im.width - tw) // 2, (im.height - th) // 2
-    im = im.crop((left, top, left + tw, top + th))
+    im = _cover_crop(Image.open(p["bg"]).convert("RGB"), CANVAS)
     if params["blur"] > 0:
         im = im.filter(ImageFilter.GaussianBlur(radius=params["blur"]))
     if params["brightness"] != 1.0:
@@ -786,7 +946,54 @@ def selftest() -> int:
     chk("align-items: flex-start" in _safe_area_html('body { align-items: center; }')
         and "align-items: center" not in _safe_area_html('body { align-items: center; }'),
         "safe-area check top-aligns the card (center → flex-start; exposes within-page clipping)")
-    # ---- course banner ----
+    # ---- course banner: the standard path (art + mark, top-right) ----
+    try:
+        from PIL import Image
+        bd = d / "branding"; bd.mkdir(parents=True, exist_ok=True)
+        # 2000x1000 (2:1) so the cover-crop has to do real work in both axes
+        Image.new("RGB", (2000, 1000), (12, 14, 20)).save(bd / "banner-bg.png")
+        chk(cmd_banner(d) == 0, "banner: dark art -> banner.webp")
+        chk(_banner_paths(d)["webp"].is_file()
+            and _banner_paths(d)["webp"].stat().st_size <= _BANNER_CAP,
+            "banner ships a webp under the 1MiB cap")
+        shot = Image.open(_banner_paths(d)["png"]).convert("RGB")
+        chk(shot.size == CANVAS, f"banner canvas is {CANVAS[0]}x{CANVAS[1]} (16:9, cover-cropped)")
+        lw, m = round(CANVAS[0] * _LOGO_W), round(CANVAS[0] * _LOGO_MARGIN)
+        logo, _ = _logo_image("cream", lw)
+        chk(logo is not None and logo.width == lw,
+            "the shipped horizontal mark loads as a PNG (no SVG rasterizer needed)")
+        if logo is not None:
+            corner = shot.crop((CANVAS[0] - m - lw, m, CANVAS[0] - m, m + logo.height))
+            flat = Image.new("RGB", corner.size, (12, 14, 20))
+            chk(list(corner.getdata()) != list(flat.getdata()),
+                "the mark is composited into the top-right corner")
+            left = shot.crop((0, 0, CANVAS[0] - m - lw, CANVAS[1]))
+            chk(len(set(left.getdata())) == 1,
+                "nothing but the mark is added — the rest of the art is untouched")
+        chk(_pick_logo_variant(Image.new("RGB", CANVAS, (12, 14, 20)),
+                               (0, 0, 100, 40))[0] == "cream",
+            "auto picks the cream mark on dark art")
+        chk(_pick_logo_variant(Image.new("RGB", CANVAS, (245, 245, 240)),
+                               (0, 0, 100, 40))[0] == "dark",
+            "auto picks the dark mark on light art")
+        chk(cmd_banner(d, no_logo=True) == 0
+            and len(set(Image.open(_banner_paths(d)["png"]).convert("RGB").getdata())) == 1,
+            "--no-logo leaves the art unbranded")
+        chk(cmd_banner(d, src=str(bd / "banner-bg.png"), out=str(d / "loose.webp")) == 0
+            and (d / "loose.webp").is_file() and (d / "loose.png").is_file(),
+            "banner runs standalone on --in/--out with no course dir")
+        chk(cmd_banner(None) == 2 and cmd_banner(d, src=str(d / "nope.png")) == 2,
+            "banner FAILs loudly with no art and with a missing --in")
+        wide = _cover_crop(Image.new("RGB", (4000, 1000)), CANVAS)
+        tall = _cover_crop(Image.new("RGB", (1000, 4000)), CANVAS)
+        chk(wide.size == CANVAS and tall.size == CANVAS,
+            "_cover_crop fills the canvas from either extreme aspect")
+        for f in (bd / "banner-bg.png", d / "loose.webp", d / "loose.png",
+                  _banner_paths(d)["png"], _banner_paths(d)["webp"]):
+            f.unlink(missing_ok=True)
+    except ModuleNotFoundError:
+        print("SKIP - standard banner (Pillow not installed)")
+    # ---- course banner: the legacy composed path ----
     cmd_scaffold_banner(d)
     bp = _banner_paths(d)
     brand_starter = bp["html"].read_text("utf-8")
@@ -826,19 +1033,34 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="render ```visual specs into on-brand images")
     ap.add_argument("cmd", nargs="?",
                     choices=["extract", "scaffold", "decorate", "render", "review", "check",
-                             "scaffold-banner", "render-banner"])
+                             "banner", "scaffold-banner", "render-banner"])
     ap.add_argument("course", nargs="?")
     ap.add_argument("--file", help="extract from a single markdown file")
     ap.add_argument("--html", help="render-banner: render this variant HTML instead of "
                                    "branding/banner.html (outputs <stem>.png/.webp beside it)")
     ap.add_argument("--dpi", type=int, default=144, help="raster DPI (default 144 = 1.5x)")
     ap.add_argument("--only", help="render only asset_ids containing this substring")
+    ap.add_argument("--in", dest="src", help="banner: course art (default branding/banner-bg.*)")
+    ap.add_argument("--out", help="banner: output .webp (default branding/banner.webp)")
+    ap.add_argument("--logo", default="auto", choices=["auto", "cream", "dark", "emerald"],
+                    help="banner: mark variant (default auto — best contrast on the corner)")
+    ap.add_argument("--logo-file", help="banner: composite this PNG/SVG instead of the "
+                                        "shipped Superteam mark")
+    ap.add_argument("--logo-width", type=float, default=_LOGO_W,
+                    help=f"banner: mark width as a fraction of {CANVAS[0]}px "
+                         f"(default {_LOGO_W})")
+    ap.add_argument("--margin", type=float, default=_LOGO_MARGIN,
+                    help=f"banner: top/right inset, same fraction (default {_LOGO_MARGIN})")
+    ap.add_argument("--no-logo", action="store_true", help="banner: art only, unbranded")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args(argv)
     if a.selftest:
         return selftest()
     if a.cmd == "extract":
         return cmd_extract(Path(a.course) if a.course else Path("."), a.file)
+    if a.cmd == "banner":                       # --in/--out make the course dir optional
+        return cmd_banner(Path(a.course) if a.course else None, a.src, a.out, a.logo,
+                          a.logo_file, a.logo_width, a.margin, a.no_logo)
     if not a.course:
         print("render_visuals: pass a course dir", file=sys.stderr); return 2
     course = Path(a.course)
