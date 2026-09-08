@@ -1,0 +1,146 @@
+# pins.yaml — the ONE place this skill records a version number.
+#
+# Why this file exists: the skill's pins used to live in prose (verify/Dockerfile ARGs,
+# a "pinned 2026-07-30" line in academy-schema.md, three hardcoded `anchor-lang 1.1.2`
+# mentions). Prose cannot be checked, so it rotted: the Dockerfile shipped SOLANA=v2.1.0 /
+# ANCHOR=0.31.1 / RUST=1.86.0 / BITCOIN=27.1 while the machine authoring the content ran
+# solana-cli 3.1.10, anchor-cli 1.1.2, rustc 1.98.1, Bitcoin Core 31.1.0. The verifier was
+# a major version behind the content it was supposed to verify.
+#
+# So: numbers live HERE, as data. `tools/pin_refresh.py` renders them into the Dockerfile
+# and checks that no doc contradicts them.
+#
+#   python3 tools/pin_refresh.py check          # TTL + Dockerfile drift + doc contradictions
+#   python3 tools/pin_refresh.py check --probe  # ...also compare against locally installed tools
+#   python3 tools/pin_refresh.py render         # rewrite the Dockerfile ARG block from here
+#   python3 tools/pin_refresh.py surfaces       # regenerate references/command-surfaces.yaml
+#
+# THE RECURSION GUARD: this file has a TTL. `check` fails once `pinned_on + ttl_days` is in
+# the past. An anti-staleness system with no expiry date rots exactly the way the Dockerfile
+# it replaces did. Refresh the numbers, then move `pinned_on` — never move `pinned_on` alone.
+
+pinned_on: 2026-09-07
+ttl_days: 120
+
+# ── toolchain ────────────────────────────────────────────────────────────────────
+# `pin`         what verify/Dockerfile installs (rendered into its ARG block)
+# `docker_arg`  the ARG name it renders to (omit = not installed in the container)
+# `probe`       the command `check --probe` runs to read the locally installed version
+# `probe_re`    regex with one capture group, applied to the probe's combined output
+# `source`      how the pin was established. `local-probe` = read off a real install on
+#               the date above; `declared` = taken from content/vendor docs, unverified here.
+toolchain:
+  python:
+    pin: "3.11"
+    docker_arg: PYTHON
+    probe: python3 --version
+    probe_re: 'Python (\d+\.\d+)'
+    source: local-probe
+  node_major:
+    pin: "23"
+    docker_arg: NODE_MAJOR
+    probe: node --version
+    probe_re: 'v(\d+)'
+    source: local-probe
+    note: >-
+      Tracks the authoring machine (23.9.0), not the Node LTS line. The container exists to
+      reproduce what the content was written against; if a course declares an LTS runtime,
+      pin that instead and say so in the course's toolchain block.
+  rust:
+    pin: "1.98.1"
+    docker_arg: RUST
+    probe: rustc --version
+    probe_re: 'rustc (\d+\.\d+\.\d+)'
+    source: local-probe
+  solana:
+    pin: "v3.1.10"
+    docker_arg: SOLANA
+    probe: solana --version
+    probe_re: 'solana-cli (\d+\.\d+\.\d+)'
+    probe_prefix: "v"
+    source: local-probe
+    note: Agave CLI. The installer URL takes the leading `v`; `solana --version` prints it without.
+  anchor:
+    pin: "1.1.2"
+    docker_arg: ANCHOR
+    probe: anchor --version
+    probe_re: 'anchor-cli (\d+\.\d+\.\d+)'
+    source: local-probe
+  foundry:
+    pin: "stable"
+    docker_arg: FOUNDRY
+    probe: forge --version
+    probe_re: 'Version: (\S+)'
+    source: local-probe
+    note: >-
+      `stable` is a foundryup channel, not a semver, so a probe mismatch here is expected and
+      is never a failure. Recorded so `surfaces` can stamp what `stable` resolved to
+      (forge 1.0.0-stable on 2026-09-07) into command-surfaces.yaml.
+  solidity:
+    pin: "0.8.28"
+    docker_arg: SOLIDITY
+    source: declared
+    note: Resolved by forge's svm at build time; no local solc to probe.
+  bitcoin:
+    pin: "31.1"
+    docker_arg: BITCOIN
+    probe: bitcoind --version
+    probe_re: 'version v(\d+\.\d+)'
+    source: local-probe
+    note: >-
+      Release/tarball string is `31.1`; `bitcoind --version` reports `v31.1.0`. The Dockerfile
+      builds https://bitcoincore.org/bin/bitcoin-core-31.1/ from this value, so it must be the
+      release string, not the reported one.
+
+# ── platform contract ────────────────────────────────────────────────────────────
+# Facts about the Superteam Academy publish target that skill docs would otherwise hardcode.
+# references/academy-schema.md mirrors the platform's schemas; these are the numbers in it.
+platform:
+  academy_schema_pinned_on: "2026-07-30"
+  academy_schema_source: "academy-courses@main"
+  challenge_runner_anchor_lang: "1.1.2"
+  draft_compile_anchor_lang: "2.0.0-rc.1"
+  note: >-
+    These two anchor-lang values are deliberately different and both correct.
+    `challenge_runner_anchor_lang` is what the Academy's Rust `buildable` grader compiles a
+    challenge against (references/academy-schema.md). `draft_compile_anchor_lang` is what
+    tools/verify_blocks.py RUST_PINS compiles lesson DRAFT blocks against. When they converge,
+    collapse them; until then, never "fix" one to match the other.
+
+# ── sourcing allowlist ───────────────────────────────────────────────────────────
+# `check` scans skill docs for hardcoded versions of the tools above. Entries here are
+# exempt: prose examples, historical statements, and per-course declarations that are
+# supposed to differ from the container pin.
+#
+# Each entry: `path` (repo-relative glob) and optional `tools` (which pins it may contradict;
+# omit = all) and `why`.
+#
+# Prefer the per-LINE escape to a whole-file entry: put `pins-ok: <why>` in a comment on the
+# line (`<!-- pins-ok: ... -->` in markdown, `# pins-ok: ...` elsewhere). Allowlisting a file
+# blinds the check on everything in it, which on a README is most of what people read.
+sourcing_allowlist:
+  - path: "skills/content-gen/references/pins.yaml"
+    why: this file IS the source
+  - path: "skills/content-gen/references/command-surfaces.yaml"
+    why: generated from probes; records observed versions by design
+  - path: "skills/content-gen/examples/**"
+    why: worked example courses declare their own toolchains
+  - path: "skills/content-gen/references/academy-schema.md"
+    tools: [anchor]
+    why: >-
+      mirrors the platform's own pin (platform.challenge_runner_anchor_lang), which is a
+      different number from the container's anchor CLI pin on purpose
+  - path: "skills/content-gen/references/research-grounding.md"
+    why: shows version strings as examples of what to ground, not as pins
+  - path: "skills/content-gen/forms/**"
+    why: form recipes quote sample commands including sample versions
+  - path: "skills/content-gen/patterns/**"
+    why: pattern files quote sample lesson text
+  - path: "skills/content-gen/method/**"
+    why: method notes quote historical incidents by version
+  - path: "courses-corpus/**"
+    why: third-party course analysis; their versions are theirs
+  - path: "forms-corpus/**"
+    why: third-party content analysis
+  - path: "HANDOFF-course-creator.md"
+    why: audit findings quote the versions that were shipped at the time

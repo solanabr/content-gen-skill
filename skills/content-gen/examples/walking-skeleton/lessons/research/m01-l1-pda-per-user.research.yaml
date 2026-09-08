@@ -15,6 +15,8 @@ research:
       status: verified
       evidence: "solana-dev: Accounts / PDA docs"
       value: null
+      recheck: "solana-dev: Solana_Documentation_Search 'account model state in accounts'"
+      verified_on: "2026-09-07"
     - id: C2
       claim: "PDAs derive via find_program_address(seeds, program_id) returning an address and a canonical bump."
       kind: api
@@ -24,6 +26,8 @@ research:
       status: verified
       evidence: "solana-dev: PDA section"
       value: null
+      recheck: "solana-dev: Solana_Documentation_Search 'find_program_address canonical bump'"
+      verified_on: "2026-09-07"
     - id: F3
       claim: "Rent-exempt minimum for the per-user counter account on devnet, in SOL."
       kind: onchain-number
@@ -33,6 +37,7 @@ research:
       status: gathering
       evidence: "TODO: helius getMinimumBalanceForRentExemption"
       value: null
+      recheck: "helius heliusChain getMinimumBalanceForRentExemption 17 --cluster devnet"
   code_to_ground:
     - id: K1
       what: "seeds array for the per-user PDA"

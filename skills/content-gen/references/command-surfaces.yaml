@@ -1,0 +1,213 @@
+# command-surfaces.yaml — the ledger of CLI surfaces that MOVED.
+#
+# Why this exists: `verify_code.py`'s bash checker was `bash -n`, a SYNTAX check. An audit of a
+# shipped course found four majors that were commands which no longer run the way the lesson
+# says. Every one of them parses fine. `bash -n` cannot see any of them:
+#
+#   * `forge create` without `--broadcast` is a silent dry run on Foundry 1.x
+#   * OpenSSL 3 rejects `openssl dgst -<digest> -sign` against an Ed25519 key
+#   * Bitcoin Core ships `-fallbackfee=0.00`, so fee estimation fails on a fresh regtest chain
+#   * Bitcoin Core no longer auto-creates a wallet, so `getnewaddress` errors out of the box
+#
+# A parser cannot know any of that. A ledger can. Tier 2 of the bash checker parses each line
+# into (tool, subcommand, flags) and asks this file whether that surface still behaves the way
+# the lesson assumes.
+#
+# EVERY RULE MUST CARRY EVIDENCE. `evidence:` says how the claim was established; a rule whose
+# evidence is "someone remembered" is worse than no rule, because it fires with authority.
+# `python3 tools/pin_refresh.py surfaces` re-probes each tool's --help, refreshes `observed:`,
+# and reports any rule whose flag has vanished from the installed tool.
+#
+# Rule kinds (all optional, all per-subcommand unless noted):
+#   requires_flags        the subcommand must carry this flag, or its default silently changed
+#   forbidden_flags       this flag form was removed
+#   forbidden_flag_combos this COMBINATION is invalid (optionally only in a matching context)
+#   removed_subcommands   (tool level) this subcommand is gone
+#   requires_preceding    some earlier line in the same block must match this regex
+#
+# Rule fields:
+#   severity             fail | warn
+#   because              what actually happens if you ignore it (the reader-visible symptom)
+#   fix                  the command that works now
+#   since                the version that changed it, where known
+#   evidence             local-probe:<cmd> | local-run:<what was executed> | vendor-doc:<url>
+#   when_block_matches   regex; the rule only applies if the whole code block matches it
+#   unless_line_matches  regex; the rule is satisfied if the line itself matches it
+
+version: 1
+generated_on: "2026-09-07"
+generator: "tools/pin_refresh.py surfaces (observed fields) + hand-authored rules"
+
+tools:
+
+  forge:
+    version_probe: "forge --version"
+    observed: "1.0.0-stable"
+    observed_on: "2026-09-07"
+    subcommands:
+      create:
+        requires_flags:
+          - flag: "--broadcast"
+            severity: fail
+            since: "1.0.0"
+            because: >-
+              Foundry 1.x made `forge create` simulate by default. Without --broadcast it prints
+              a deploy that never happened: no transaction, no address on chain, and a lesson
+              that tells the reader to copy an address which does not exist. The command exits 0,
+              so nothing downstream notices.
+            fix: "forge create --broadcast --rpc-url <url> --private-key <key> src/C.sol:C"
+            evidence: "local-probe:forge create --help lists `--broadcast  Broadcast the transaction` (forge 1.0.0-stable, 2026-09-07)"
+      script:
+        requires_flags:
+          - flag: "--broadcast"
+            severity: warn
+            because: >-
+              Same simulate-by-default shape as `forge create`. A `forge script` without
+              --broadcast is a dry run; that is often intended in a lesson, so this is a warn,
+              not a fail. Say in the prose which one you meant.
+            fix: "forge script Script.s.sol --rpc-url <url> --broadcast"
+            evidence: "local-probe:forge script --help (forge 1.0.0-stable, 2026-09-07)"
+
+  openssl:
+    version_probe: "openssl version"
+    observed: "3.6.3"
+    observed_on: "2026-09-07"
+    subcommands:
+      dgst:
+        forbidden_flag_combos:
+          - flags: ["-sign"]
+            with_any: ["-sha256", "-sha512", "-sha384", "-sha1", "-md5", "-sha3-256"]
+            when_block_matches: "ed25519|ed448|Ed25519|Ed448"
+            severity: fail
+            since: "3.0"
+            because: >-
+              EdDSA is a one-shot signature over the whole message; it does not take a
+              pre-computed digest. OpenSSL 1.1.1 tolerated the digest flag, OpenSSL 3 refuses:
+              "Explicit digest not allowed with EdDSA operations". The lesson's key generation
+              still works, so the failure lands several steps later on a command the reader
+              believes is unrelated.
+            fix: "openssl pkeyutl -sign -rawin -inkey ed25519.pem -in msg.bin -out sig.bin"
+            evidence: >-
+              local-run:`openssl dgst -sha256 -sign ed25519.pem -out sig msg` on OpenSSL 3.6.3
+              printed "ed25519_digest_signverify_init:invalid digest ... Explicit digest not
+              allowed with EdDSA operations"; the same command without the digest flag, and
+              `pkeyutl -sign -rawin`, both produced a 64-byte signature (2026-09-07)
+      pkeyutl:
+        requires_flags:
+          - flag: "-rawin"
+            when_block_matches: "ed25519|ed448|Ed25519|Ed448"
+            severity: fail
+            since: "3.0"
+            because: >-
+              For an EdDSA key `pkeyutl -sign` needs -rawin so the whole message is signed.
+              Without it OpenSSL 3 treats the input as a pre-hashed digest and the signature
+              does not verify against any normal verifier.
+            fix: "openssl pkeyutl -sign -rawin -inkey ed25519.pem -in msg.bin -out sig.bin"
+            evidence: "vendor-doc:openssl-pkeyutl(1) -- `-rawin` required for Ed25519/Ed448"
+          - flag: "-in"
+            when_block_matches: "-rawin"
+            severity: fail
+            since: "3.0"
+            because: >-
+              A one-shot EdDSA signature needs the message length up front, so -rawin requires a
+              SEEKABLE input. Piping into it ("echo hi | openssl pkeyutl -sign -rawin") dies with
+              "unable to determine file size for oneshot operation / Public Key operation error"
+              and then prints 0 bytes, which reads like an empty signature rather than a failure.
+              This rule was added because bash tier 3 caught the pipe form running for real in a
+              shipped lesson; tier 2 now catches it without executing anything.
+            fix: "openssl pkeyutl -sign -rawin -inkey k.pem -in msg.txt -out sig.bin"
+            evidence: >-
+              local-run:`echo hi | openssl pkeyutl -sign -inkey k.pem -rawin | wc -c` on OpenSSL
+              3.6.3 printed "Error: unable to determine file size for oneshot operation / Public
+              Key operation error" and 0 bytes; the same command with `-in msg.txt` produced 64
+              bytes (2026-09-07)
+
+  bitcoind:
+    version_probe: "bitcoind --version"
+    observed: "31.1.0"
+    observed_on: "2026-09-07"
+    requires_flags:
+      - flag: "-fallbackfee"
+        when_block_matches: "-regtest|regtest=1|-signet|signet=1"
+        severity: fail
+        since: "0.20"
+        because: >-
+          -fallbackfee defaults to 0.00, which disables the fallback entirely. A fresh regtest
+          or signet chain has no fee-estimation history, so the first sendtoaddress /
+          fundrawtransaction fails with "Fee estimation failed. Fallbackfee is disabled."
+          The node starts fine, so the lesson looks correct until the transaction step.
+        fix: "bitcoind -regtest -fallbackfee=0.0002 -daemon"
+        evidence: "local-probe:`bitcoind -help` documents `-fallbackfee=<amt> ... (default: 0.00)` (Bitcoin Core v31.1.0, 2026-09-07)"
+
+  bitcoin-cli:
+    version_probe: "bitcoin-cli --version"
+    observed: "31.1.0"
+    observed_on: "2026-09-07"
+    subcommands:
+      getnewaddress:
+        requires_preceding: "createwallet|loadwallet|-rpcwallet|-wallet="
+        severity: fail
+        since: "0.21"
+        because: >-
+          Bitcoin Core stopped auto-creating a default wallet. With no wallet loaded every
+          wallet RPC returns "No wallet is loaded. Load a wallet using loadwallet or create a
+          new one with createwallet", which reads to a learner like a broken install.
+        fix: "bitcoin-cli -regtest createwallet demo   # then getnewaddress"
+        evidence: "local-probe:`bitcoind -help` on -wallet= says \"This only loads existing wallets and does not create new ones\" (Bitcoin Core v31.1.0, 2026-09-07)"
+      getbalance:
+        requires_preceding: "createwallet|loadwallet|-rpcwallet|-wallet="
+        severity: fail
+        since: "0.21"
+        because: Same no-auto-wallet change as getnewaddress; every wallet RPC is affected.
+        fix: "bitcoin-cli -regtest createwallet demo   # then getbalance"
+        evidence: "local-probe:`bitcoind -help` -wallet= semantics (Bitcoin Core v31.1.0, 2026-09-07)"
+      sendtoaddress:
+        requires_preceding: "createwallet|loadwallet|-rpcwallet|-wallet="
+        severity: fail
+        since: "0.21"
+        because: Same no-auto-wallet change; also the first command to hit the fallbackfee default.
+        fix: "bitcoin-cli -regtest createwallet demo   # then sendtoaddress"
+        evidence: "local-probe:`bitcoind -help` -wallet= semantics (Bitcoin Core v31.1.0, 2026-09-07)"
+
+  anchor:
+    version_probe: "anchor --version"
+    observed: "1.1.2"
+    observed_on: "2026-09-07"
+    removed_subcommands:
+      - name: "idl"
+        severity: warn
+        since: "1.0"
+        because: >-
+          Anchor 1.0 removed the legacy on-chain IDL instructions. IDLs are published and read
+          through Program Metadata, and consumed with declare_program!.
+        fix: "publish via Program Metadata; consume with declare_program!(...)"
+        evidence: "vendor-doc:anchor 1.0 release notes (legacy IDL instructions removed); mirrored in .claude/rules/anchor.md"
+    subcommands:
+      test:
+        requires_flags:
+          - flag: "--skip-local-validator"
+            severity: warn
+            when_block_matches: "solana-test-validator"
+            because: >-
+              Anchor 1.0 runs `anchor test` against Surfpool, not solana-test-validator. A lesson
+              that starts its own solana-test-validator and then runs `anchor test` gets two
+              validators fighting for 8899.
+            fix: "anchor test   # Surfpool is started for you; drop the manual validator"
+            evidence: "vendor-doc:anchor 1.0 -- `anchor test`/`anchor localnet` use Surfpool"
+
+  # Listed with no rules yet: presence here is what makes `extract_inline_commands` treat a
+  # backticked span as a command worth checking, and what `surfaces` re-probes each refresh.
+  solana:
+    version_probe: "solana --version"
+    observed: "3.1.10"
+    observed_on: "2026-09-07"
+
+  cargo:
+    version_probe: "cargo --version"
+    observed: "1.98.1"
+    observed_on: "2026-09-07"
+
+  npm:
+    version_probe: "npm --version"
+    observed: "10.9.2"
+    observed_on: "2026-09-07"

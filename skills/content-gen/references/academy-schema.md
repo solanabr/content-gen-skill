@@ -89,29 +89,76 @@ blocks:
 
 ## Quiz block
 
+Quiz blocks are emitted **INLINE** in `lesson.yaml`. Never author a standalone `*.quiz.yaml`: it
+lints green, the platform compiler then silently drops it, and the lesson ships with no check at all
+while nothing reports the loss. `validate_course.py quiz` HARD-fails one.
+
 ```yaml
 - key: check
   type: quiz
   questions:
-    - id: q1                             # stable; correctness is keyed to option id, never position
-      prompt: "Which of these stores state?"
+    - id: q1                             # stable; correctness is keyed to option id, never position.
+                                         # NEVER renamed — translations and the layout ledger bind on ids.
+      prompt: "You just ran getAccountInfo on a program id and on a PDA. Which one carries your state?"
       multiSelect: false                 # default false
-      options:                           # 3 preferred (≥2 min); each {id, label, correct}, feedback on wrong
-        - { id: a, label: Instructions, correct: false, feedback: "Inputs, not storage." }
-        - { id: b, label: Programs, correct: false, feedback: "Stateless by design — code only." }
-        - { id: c, label: Data accounts, correct: true }
-      explanation: "..."                 # optional but expected; shown after answering
+      options:                           # >=4, and exactly 5 when the mean label is <=70 chars.
+                                         # Opaque ids o1..o5. `feedback` on EVERY option.
+        - { id: o1, label: "The instruction data, since that is what the transaction carried", correct: false, feedback: "Inputs, not storage: the runtime discards it after execution." }
+        - { id: o2, label: "The program account, because code and state live together there", correct: false, feedback: "Programs are stateless by design; that account holds the ELF." }
+        - { id: o3, label: "The PDA the program derived and owns", correct: true, feedback: "Right, and that ownership is why only the program can write it." }
+        - { id: o4, label: "The fee payer's system account, which the runtime debits", correct: false, feedback: "It holds lamports, not program state." }
+        - { id: o5, label: "The recent blockhash, which pins the transaction to a slot", correct: false, feedback: "A lifetime marker, not an account at all." }
+      explanation: "..."                 # REQUIRED; shown after answering — the paragraph that teaches the point
 ```
-- `multiSelect: false` → **exactly one** `correct: true`; `true` → **≥ 1**.
-- Put `feedback` on every wrong option and a substantive `explanation` on every question.
-- **Authoring bar** (matches the published `btc-to-sol-evolution` course): scenario-driven, often
-  two-part prompts ("what property is that, and why does it matter?") tied to something the learner
-  just ran; 3 options; distractors are real plausible misconceptions matched to the answer in length
-  and register — never joke options, never a giveaway-long correct label.
-- **Vary the correct answer's position roughly evenly across the course.** Correctness is id-keyed,
-  but learners see slots: a course where the right answer always sits first is guessable without
-  reading (this shipped once — 33/33 on 'a'). `validate_course.py` HARD-fails >50% one-slot skew
-  across ≥6 single-select questions and advises when the correct label is consistently the longest.
+
+### The authoring policy (all HARD in `validate_course.py quiz`)
+- **`multiSelect: false` → exactly one `correct: true`.** Set `multiSelect: true` wherever the honest
+  answer is a set. No cap, no quota — but never convert a single-answer question to multiSelect just
+  to add difficulty. Its floor is **5 options with 2 ≤ correct ≤ k−2**, so neither "all of them" nor
+  "exactly one" is a strategy.
+- **≥4 options; exactly 5 when the mean option label is ≤70 characters.** Short labels are cheap, and
+  a 3-option question with one-line options is close to a coin flip.
+- **`feedback` on EVERY option, the correct one included**, plus an `explanation` on every question.
+  The correct option's feedback is where "yes, and here is the distinction you just made" lands.
+- **Opaque ids `o1…o5`.** Lettered ids imply that id order is display order; it is not.
+- **Scenario-driven prompts tied to something the learner just ran**, and distractors that are real
+  misconceptions parallel to the answer in length and register. Never joke options, never a
+  giveaway-long correct label.
+- **No em-dashes** in prompts, labels, feedback, or explanations. `tools/dedash.py` covers drafts
+  only; quiz text is fixed in the brief.
+
+### Option order is computed, never chosen
+
+**When a statistical property must hold, compute it in a tool; never ask for it in a prompt.**
+
+This section used to say "vary the correct answer's position roughly evenly across the course", and
+`validate_course.py` HARD-failed >50% of keys in one slot. The wave-2 generator satisfied that by
+seeding each module's first answer at `module_index % 3` and rotating forward. It worked — every
+wave-2 course is near-perfectly balanced. It also made the answer key a deterministic a→b→c cycle, so
+the position of one answer predicts the next: best order-1 Markov accuracy 85.4%, 86.2%, 92.0% and
+94.0% on the shipped courses, against 39.6% for an honest shuffle. Nine of the ten generated courses
+PASSED that gate. A stronger instruction would have produced a different artifact, not randomness.
+
+So **write the options in whatever order they occur to you and do not think about it.**
+`tools/quiz_layout.py permute` reorders each question's option array from
+`sha256(salt | courseId | lessonSlug | blockKey | questionId)` and writes a **layout ledger** into the
+manifest. `quiz_layout.py verify` is then a byte-comparison against that ledger — provenance, not
+statistics, which is conclusive even at n=1 where every distributional test is powerless. The address
+is a 4-tuple because **question ids are not unique within a course**: one shipped course uses `q1`,
+`q2`, `q3` for all 33 of its questions. Permutation touches array order and nothing else (it asserts
+that itself), so it is safe on an already-translated course, whose strings bind on option id.
+
+`validate_course.py quiz` measures the rest, all **two-sided** — being *too* even is a failure,
+because a balancing scheme lands closer to perfect than real randomness ever does. Markov
+exploitability against a permutation null, slot-repeat rate, position and length-RANK uniformity,
+first-key-vs-module-index, hedge/absolutes concentration, and a content-blind heuristic suite
+(longest, shortest, only-option-without-an-absolute, only-hedged-option, most-prompt-overlap,
+least-like-the-others) scored against chance. A metric under its sample floor reports
+**INCONCLUSIVE, not passed**, and names what it could not rule out.
+
+Pipeline order matters, or two tools deadlock: `quiz_edit.py merge` refuses any file whose option
+order moved, so label QA runs FIRST and `quiz_layout.py permute` is the LAST mutation before
+validation.
 
 ## Code block — the three test modes
 
@@ -203,4 +250,8 @@ auto-detects `branding/banner.{webp,jpg,jpeg}`, copies it to `assets/`, and emit
 - **code** ← the lesson brief's `coding_challenges`; each challenge's `starter`/`solution`/`tests` files are
   copied into `<challenge-id>/` under the lesson dir. `language ∈ {rust, typescript}` only — Bitcoin/CLI/
   Python/Solidity lessons carry quizzes but no code block.
-- `skills` ← mapped from the course DAG nodes to `skills.yaml` slugs.
+- `skills` ← the brief's own `skills:` when set, mapped through `academy.skills_map` (an entry that
+  is already a `skills.yaml` slug passes through). Only when a brief has none does the export fall
+  back to the MODULE's `teaches_skills` + the brief's prerequisites — a fallback that gives every
+  lesson in the module the same array, which is why `validate_course.py briefs` flags a module whose
+  lessons are >80% byte-identical. These tags render on the learner's lesson card: set them per lesson.

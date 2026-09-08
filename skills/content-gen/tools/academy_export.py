@@ -25,12 +25,18 @@ in the manifest, overridable by CLI flags; nothing else in the manifest changes.
     python academy_export.py check --course content/courses/<id>
     python academy_export.py --selftest
 
+Publishing is the last moment a fact can be caught, so this REFUSES to project a course
+whose research claims are past their TTL (course_lib's freshness table; the same rows
+`fact_freshness.py stale` prints). `--allow-stale` overrides it and stamps the count into
+the summary line — an override that is loud is an override people notice.
+
 The runtime contract (starter fails / solution passes) is NOT checked here — that is
 verify_challenges.py. This tool only materializes the tree.
 """
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import json
 import math
 import re
@@ -38,9 +44,54 @@ import shutil
 import sys
 from pathlib import Path
 
-from course_lib import to_yaml, load_manifest, flatten_lessons, CHALLENGE_LANGS
+from course_lib import (to_yaml, load_manifest, flatten_lessons, CHALLENGE_LANGS,
+                        stale_claims)
 
 EXT = {"rust": ".rs", "typescript": ".ts"}
+
+
+def _stale_rows(course_dir, m: dict) -> list[dict]:
+    """Every expired claim, from the manifest AND the on-disk research scaffolds.
+
+    `fact_freshness.collect` is the same reconciliation `fact_freshness.py stale` runs, so
+    the blocking step in SKILL.md 13 and this gate can never disagree about what is stale.
+    Manifest-only (`course_lib.stale_claims`) is the fallback when there is no course dir.
+    """
+    if course_dir is not None:
+        import fact_freshness                              # noqa: PLC0415  (same tools/ dir)
+        return [r for r in fact_freshness.collect(course_dir, None, _dt.date.today())["rows"]
+                if r["live"] and r["state"] == "stale"]
+    return stale_claims(m)
+
+
+def _freshness_gate(rows: list[dict], allow_stale: bool) -> str:
+    """The summary stamp. Publishing is the last moment a fact can be caught.
+
+    A course whose research claims are past their TTL is a course about to re-ship facts
+    nobody has looked at since they were written — the exact shape of all six defects the
+    freshness layer exists to prevent. So the projection REFUSES by default. `--allow-stale`
+    is the deliberate override and it is not free: it stamps the count into the summary
+    line every reader of that export sees, and names every expired claim on stderr.
+    """
+    if not rows:
+        return ""
+    if not allow_stale:
+        print(f"academy export REFUSED: {len(rows)} research claim(s) are past their TTL.",
+              file=sys.stderr)
+        for r in rows:
+            print(f"  STALE {r['lesson']}/{r['id']} [{r['kind'] or '?kind'}] "
+                  f"{r['age_days']}d old / {r['ttl']}d TTL "
+                  f"(verified {r['verified_on'] or 'never'})", file=sys.stderr)
+        print("  Re-probe them: fact_freshness.py probes --course <dir>  (method/fact-recheck.md)\n"
+              "  To publish anyway: --allow-stale, which stamps the staleness into the summary.",
+              file=sys.stderr)
+        return ""
+    print(f"  WARN: --allow-stale — exporting {len(rows)} claim(s) past their TTL:",
+          file=sys.stderr)
+    for r in rows:
+        print(f"    STALE {r['lesson']}/{r['id']} [{r['kind'] or '?kind'}] "
+              f"{r['age_days']}d old / {r['ttl']}d TTL", file=sys.stderr)
+    return f"  !! PUBLISHED STALE: {len(rows)} claim(s) past TTL (--allow-stale)"
 
 
 def _safe(fragment) -> str:
@@ -183,11 +234,33 @@ def _lesson_id(prefix: str, lid: str) -> str:
 
 
 def _skills_for(brief: dict, mod: dict, cfg: dict) -> list[str]:
-    """Map internal DAG skill nodes (module teaches/requires) to academy skills.yaml slugs
-    via cfg['skills_map']; fall back to default_skills. Deduped, order-stable."""
+    """A lesson's academy skill tags: the brief's own `skills:` when it has them, the
+    MODULE derivation only when it does not.
+
+    Why the order matters. This function used to read `mod["teaches_skills"]` plus the
+    brief's prerequisites and nothing else, so **every lesson in a module got a
+    byte-identical array by construction** — measured across the ten shipped courses,
+    all 79 modules. A round-2 audit filed that as a major: one 31-lesson course of mostly
+    Rust, TypeScript and Docker content credited Solana-specific skills on every lesson,
+    and its container lessons (installing Docker, writing a Dockerfile) were tagged with a
+    slug the learner reads as "Program Development". A module-level field cannot describe
+    a lesson, and the tag is learner-facing.
+
+    `brief["skills"]` (lesson-brief-schema §C) is the per-lesson answer. Entries map
+    through `cfg['skills_map']` like any DAG node; an entry that is already an academy
+    slug passes through, so a brief can name either vocabulary. Deduped, order-stable."""
     smap = cfg["skills_map"]
+    explicit = brief.get("skills")
+    if explicit:
+        out: list[str] = []
+        for n in explicit:
+            slug = smap.get(n, n)
+            if slug and slug not in out:
+                out.append(slug)
+        if out:
+            return out
     nodes = list(mod.get("teaches_skills", [])) + list(brief.get("prerequisites", []))
-    out: list[str] = []
+    out = []
     for n in nodes:
         slug = smap.get(n)
         if slug and slug not in out:
@@ -233,7 +306,7 @@ def plan_academy(course_dir: Path, cfg: dict, m: dict,
     if banner:
         if banner.stat().st_size > (1 << 20):
             warnings.append(f"branding/{banner.name}: {banner.stat().st_size} bytes exceeds "
-                            f"the 1 MiB upstream asset cap — re-run render_visuals.py render-banner")
+                            f"the 1 MiB upstream asset cap — re-run render_visuals.py banner")
         copies.append((str(banner.resolve()), f"assets/{banner.name}"))
         course_doc.setdefault("thumbnail", f"assets/{banner.name}")  # academy block wins
         for extra in ("banner.html", "logo.svg"):
@@ -385,9 +458,14 @@ def plan_academy(course_dir: Path, cfg: dict, m: dict,
     return files, warnings, copies
 
 
-def emit(course_dir: str, out_dir: str, opts: dict, force: bool) -> int:
+def emit(course_dir: str, out_dir: str, opts: dict, force: bool,
+         allow_stale: bool = False) -> int:
     course_dir = Path(course_dir)
     m = load_manifest(course_dir)
+    stale_rows = _stale_rows(course_dir, m)
+    stale_stamp = _freshness_gate(stale_rows, allow_stale)
+    if stale_rows and not allow_stale:
+        return 1
     cfg = _academy_cfg(m, opts)
     out = Path(out_dir)
     files, warnings, copies = plan_academy(course_dir, cfg, m, out_dir=out)
@@ -409,15 +487,19 @@ def emit(course_dir: str, out_dir: str, opts: dict, force: bool) -> int:
                  and rel.endswith((".png", ".webp", ".jpg", ".jpeg", ".gif")))
     print(f"academy emit: {written} files → {out}/  (course {cfg['course_id']}, {len(files)} generated, "
           f"{len(copies)} copied, images {n_refs} referenced/{n_pngs} copied, {len(warnings)} warning(s))")
+    if stale_stamp:
+        print(stale_stamp)
     if cfg["creator"] == "REPLACE_WITH_YOUR_SOLANA_WALLET":
         print("  NOTE: set course.creator to a real Solana wallet before publishing "
               "(manifest 'academy.creator' or --creator).", file=sys.stderr)
     return 0
 
 
-def check(course_dir: str, opts: dict) -> int:
+def check(course_dir: str, opts: dict, allow_stale: bool = False) -> int:
     course_dir = Path(course_dir)
     m = load_manifest(course_dir)
+    stale_rows = _stale_rows(course_dir, m)
+    _freshness_gate(stale_rows, allow_stale)
     cfg = _academy_cfg(m, opts)
     files, warnings, copies = plan_academy(course_dir, cfg, m)
     n_refs = sum(f.count("](assets/") for rel, f in files.items() if rel.endswith("intro.md"))
@@ -432,7 +514,7 @@ def check(course_dir: str, opts: dict) -> int:
         print("   " + rel + "  (copied)")
     for w in warnings:
         print("  warn: " + w)
-    return 0
+    return 1 if (stale_rows and not allow_stale) else 0
 
 
 def selftest() -> int:
@@ -588,6 +670,60 @@ def selftest() -> int:
             and not (out / "visual-src" / "banner-bg-blur.png").exists(),
             "banner source + logo + original bg (not the blur bake) under visual-src/")
 
+        # ── the freshness publish gate ──────────────────────────────────────────
+        stale_man = json.loads(json.dumps(man))
+        stale_man["lessons"][0]["research"] = {"claims": [
+            {"id": "C1", "kind": "onchain-number", "status": "verified",
+             "verified_on": "2020-01-01", "recheck": "rpc getMinimumBalanceForRentExemption 165"}]}
+        (cdir / "manifest.json").write_text(json.dumps(stale_man), "utf-8")
+        out2 = Path(td) / "academy-stale"
+        chk(emit(str(cdir), str(out2), opts={}, force=True) == 1,
+            "emit REFUSES a course with a past-TTL claim")
+        chk(not out2.exists(), "…and writes nothing at all when it refuses")
+        chk(check(str(cdir), opts={}) == 1, "check reports the same refusal")
+        chk(emit(str(cdir), str(out2), opts={}, force=True, allow_stale=True) == 0
+            and (out2 / "course.yaml").is_file(),
+            "--allow-stale publishes anyway")
+        chk(_freshness_gate(_stale_rows(cdir, stale_man), True)
+            .startswith("  !! PUBLISHED STALE: 1"),
+            "…and stamps the count into the export summary rather than hiding it")
+        chk(_freshness_gate(_stale_rows(cdir, man), False) == "",
+            "a course with no stale claims passes the gate silently")
+
+        # the export gate and `fact_freshness.py stale` read the SAME rows: a claim that
+        # exists only in a hand-edited research.yaml must still block the publish
+        (cdir / "manifest.json").write_text(json.dumps(man), "utf-8")
+        rd = cdir / "lessons" / "research"
+        rd.mkdir(parents=True, exist_ok=True)
+        (rd / "m00-l1.research.yaml").write_text(
+            "research:\n  lesson_id: the-basics\n  claims:\n    - id: Y1\n"
+            "      kind: version-pin\n      status: verified\n"
+            "      verified_on: \"2020-01-01\"\n      claim: \"anchor 0.31.1\"\n", "utf-8")
+        chk([r["id"] for r in _stale_rows(cdir, man)] == ["Y1"],
+            "a stale claim living only in lessons/research/ still blocks the export")
+        chk(stale_claims(man) == [],
+            "…which manifest-only reading would have missed (why _stale_rows exists)")
+
+    # ── per-lesson skills beat the module derivation (the audit's tag major) ──
+    _cfg = {"skills_map": {"account-model": "account-model", "docker": "containers"},
+            "default_skills": ["solana-fundamentals"]}
+    _mod = {"teaches_skills": ["account-model"]}
+    chk(_skills_for({}, _mod, _cfg) == ["account-model"],
+        "no brief skills -> the module derivation still applies (back-compatible)")
+    chk(_skills_for({"skills": ["docker"]}, _mod, _cfg) == ["containers"],
+        "brief skills WIN over the module's teaches_skills, mapped through skills_map")
+    chk(_skills_for({"skills": ["typescript-basics"]}, _mod, _cfg) == ["typescript-basics"],
+        "an entry already in academy-slug vocabulary passes through unmapped")
+    chk(_skills_for({"skills": ["docker", "docker"]}, _mod, _cfg) == ["containers"],
+        "brief skills are deduped, order-stable")
+    chk(_skills_for({"skills": []}, _mod, _cfg) == ["account-model"],
+        "an EMPTY skills list is 'unset', not 'no skills' (the platform needs a non-empty tag)")
+    chk(_skills_for({}, {}, _cfg) == ["solana-fundamentals"],
+        "nothing to derive -> default_skills, unchanged")
+    chk(_skills_for({"skills": ["docker"]}, _mod, _cfg)
+        != _skills_for({"skills": ["account-model"]}, _mod, _cfg),
+        "two lessons in the SAME module can now differ — the whole point")
+
     print("\n" + ("ACADEMY_EXPORT SELFTESTS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1
 
@@ -599,6 +735,9 @@ def main(argv=None) -> int:
     for name in ("emit", "check"):
         p = sub.add_parser(name)
         p.add_argument("--course", required=True, help="internal course dir (reads manifest.json + drafts)")
+        p.add_argument("--allow-stale", action="store_true",
+                       help="publish even though research claims are past their TTL; stamps "
+                            "the count into the export summary (see method/fact-recheck.md)")
         if name == "emit":
             p.add_argument("--out", required=True, help="academy output dir (e.g. content/academy/courses/<slug>)")
             p.add_argument("--force", action="store_true")
@@ -612,8 +751,8 @@ def main(argv=None) -> int:
     opts = {k: getattr(a, k) for k in ("course_id", "slug", "prefix", "creator", "difficulty")
             if getattr(a, k, None)}
     if a.cmd == "emit":
-        return emit(a.course, a.out, opts, a.force)
-    return check(a.course, opts)
+        return emit(a.course, a.out, opts, a.force, a.allow_stale)
+    return check(a.course, opts, a.allow_stale)
 
 
 if __name__ == "__main__":

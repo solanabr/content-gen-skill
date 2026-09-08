@@ -87,13 +87,17 @@ self-assessment + provided solution → auto-graded tests → on-chain cryptogra
 capstone build → completion NFT / certificate. **Completion is gated on producing something**, never on
 finishing the videos. Provide solutions "as a resource, not a crutch."
 
-### 6.1 Formative checkpoints — quizzes check, they don't gate
+### 6.1 Formative checkpoints — artifacts gate, quizzes check
 A lesson's *terminal* proof is `assessment` (a build or retrieval the learner must complete). **Formative**
-checks — the optional `quiz_blocks` and `coding_challenges` in a brief (lesson-brief-schema §H) — sit
+checks — the `quiz_blocks` and optional `coding_challenges` in a brief (lesson-brief-schema §H) — sit
 *inside* the lesson and give immediate feedback; they never gate passing. Guidance:
 - **Quizzes** verify understanding with per-option feedback and an explanation; put them after the
   overview (concept check) and/or after the lab (readiness check). Language-agnostic — even a Bitcoin or
-  CLI lesson earns one. They award no gate.
+  CLI lesson earns one. They award no gate. **Never choose the option order**: write the options in
+  whatever order they occur to you and let `tools/quiz_layout.py permute` assign it from a hash.
+  Hand-ordering is a gate failure — anyone asked to "spread the answers evenly" produces a *scheme*,
+  and a scheme is exactly what a learner learns to read
+  (references/academy-schema.md §Option order is computed, never chosen).
 - **Coding challenges** are runnable, RUST/TYPESCRIPT-only exercises whose grade IS the test run: the
   starter must fail, the solution must pass (`tools/verify_challenges.py` proves it). Use them where the
   lesson's real code is Solana TS or a Rust/Anchor program; a base challenge can double as the lesson's

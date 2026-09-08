@@ -51,7 +51,14 @@ tool cannot see them).
 | Briefs don't parrot the docs' worked exemplar (the PDA/'no mappings' lesson) | JUDGE | agent / human read |
 | Course opens with a motivate lesson that puts code in hands fast; closes with a conclusion | JUDGE (+ADVISORY in validator) | agent / human read |
 | Draft carries the scaled visual floor (max(2, ceil(words/600))), all PARSING; fences clean; no prose wall >700w; do-element in the first 300w (opener 150) | HARD | `validate_course.py drafts` |
-| Verified claims cite a kit surface; artifact accretion edges run forward | HARD | `validate_course.py research` / `artifacts` |
+| Every lesson carries a research scaffold; verified claims cite a kit surface; artifact accretion edges run forward | HARD | `validate_course.py research` / `artifacts` |
+| No lesson OPENS a path no earlier lesson emits (and `course.starter_assets` does not ship) | HARD | `validate_course.py continuity` |
+| No lesson CONSUMES a symbol nothing earlier provides | HARD | `validate_course.py continuity` |
+| No symbol provided twice with different signatures unless `ledger.renames` declares it | HARD | `validate_course.py continuity` |
+| No lesson still uses a name after its declared `since_lesson` rename | HARD | `validate_course.py continuity` |
+| Every build lesson carries a `ledger`; `state_in` of N describes `state_out` of N−1 | ADVISORY | `validate_course.py continuity` |
+| Later code fences call each provided symbol with the shape it was given | ADVISORY | `tools/continuity.py scan` |
+| A declared rename's old name is gone from later code fences | ADVISORY | `tools/continuity.py renames` |
 | No corpus signature in briefs or drafts | HARD | blocklist grep (`corpus-signatures.txt`) |
 | Alt text could stand in for the visual; visual types show two kinds of thinking | JUDGE (+shape ADVISORY) | agent / human read |
 | Pace fits 2026 attention: payoff/empowerment beat every few paragraphs | JUDGE | agent / human read |
@@ -90,6 +97,12 @@ guest-only jobs) — the agent confirms or re-tags.
    (and again `--course <dir>` after emit). Every HARD must pass. This mechanizes
    the outcome⇄proof trace, the DAG walk, the ladder, the capstone-coverage, and
    the brief schema — don't re-do them by hand.
+1b. **Run the continuity scan over the drafts.**
+   `python3 ../tools/continuity.py check --course content/courses/<id> --infer`. Advisory by
+   design, so read it rather than waiting for it to fail: a hit means a later lesson calls a
+   helper with a shape no earlier lesson gave it, which is the one defect class an audit found
+   in **five of five** generated courses and no gate could see. `--infer` reads the drafts'
+   own function definitions, so it works on a course with no ledger authored yet.
 2. **Run the JUDGE items.** Read for the judgement rows above: is each `hook`
    felt, each `the_tradeoff` real, each `dominant_job` correct, one new element
    per lesson?
@@ -118,6 +131,45 @@ guest-only jobs) — the agent confirms or re-tags.
 - 60-day course no one finishes → cut to the outcome; tight beats exhaustive.
 
 
+## Assessment layer — artifacts gate, quizzes check
+
+Two different jobs, and conflating them is how a course ends up with neither.
+
+**Artifacts gate.** Every check that decides whether a learner has the skill is artifact-based:
+build, deploy, exploit, inspect, pass the test. `forms/course.md` §Structure recipe says "never
+MCQs", and that is right *about gating* — the corpus has zero quizzes and no autograded MCQ has
+ever gated a lesson here.
+
+**Quizzes check.** A quiz is a formative retrieval beat inside the lesson: immediate per-option
+feedback, no XP, no gate (`design-spine.md` §6.1). The corpus having zero quizzes is a **gap**, not
+a rule — spaced retrieval is the corpus-wide weakness the spine's checkpoints exist to fix. Every
+lesson earns one, including Bitcoin, EVM and CLI lessons where no code block is possible.
+
+| Non-negotiable | Enforcement | Where |
+|---|---|---|
+| Option order is COMPUTED from a hash and recorded in a layout ledger; the ledger verifies | HARD | `validate_course.py quiz` + `tools/quiz_layout.py` |
+| Answer key not exploitable: order-1/order-2 Markov accuracy vs a permutation null | HARD | `validate_course.py quiz` |
+| Slot-repeat rate consistent with chance — **two-sided**, so never-repeats fails too | HARD | `validate_course.py quiz` |
+| Key position + key length RANK uniform per option-count stratum, and not TOO uniform | HARD | `validate_course.py quiz` |
+| No content-blind strategy beats chance (longest / shortest / only-hedged / no-absolute / prompt-overlap / least-like-the-others) | HARD | `validate_course.py quiz` |
+| ≥4 options; exactly 5 when the mean label is ≤70 chars; multiSelect floors at 5 with 2 ≤ correct ≤ k−2 | HARD | `validate_course.py quiz` |
+| `feedback` on EVERY option including the correct one; `explanation` on every question | HARD | `validate_course.py quiz` |
+| No em-dashes anywhere in quiz text | HARD | `validate_course.py quiz` |
+| Quizzes emitted INLINE in `lesson.yaml`; no standalone `*.quiz.yaml` | HARD | `validate_course.py quiz` (course-dir scan) |
+| Any metric under its sample floor reports INCONCLUSIVE, not passed | HARD (by construction) | `tools/quiz_metrics.py` |
+| Distractors are REAL misconceptions a learner of this lesson would hold, not near-misses invented to fill a slot | JUDGE | agent / human read |
+| The prompt is a scenario tied to something the learner just ran, not a definition lookup | JUDGE | agent / human read |
+| The correct option's `feedback` names the distinction, rather than saying "correct" | JUDGE | agent / human read |
+| A multiSelect question is set-valued because the subject matter is, never to add difficulty | JUDGE | agent / human read |
+| The quiz checks the lesson's ONE new element, not trivia from its color beats | JUDGE | agent / human read |
+| No question is answerable from the lesson TITLE alone | JUDGE (+ answer-leak ADVISORY) | agent / human read |
+
+**The law behind the HARD rows:** *when a statistical property must hold, compute it in a tool;
+never ask for it in a prompt.* The previous gate HARD-failed ">50% of keys in one slot" and the
+generator was told to satisfy it by rotating the key a→b→c per module. The marginal came out
+perfect and the sequence came out 85-94% predictable. A stronger instruction produces a different
+artifact, not randomness.
+
 ## Review-hardening JUDGE rows (added from the course review)
 
 | Non-negotiable | Enforcement | Where |
@@ -129,3 +181,44 @@ guest-only jobs) — the agent confirms or re-tags.
 | Languages the labs require are declared + taught just-in-time; prerequisite is honest | JUDGE | agent / human read |
 | Toolkit-accretion / capstone SHOWS a prior rung wired in (not asserted) | JUDGE | agent / human read |
 | Scope claims (mainnet/DEX/bridge) are taught or explicitly labelled bonus | JUDGE | agent / human read |
+| **A lesson's skill tags name what THAT lesson actually teaches, not what its module is about** | JUDGE (+ADVISORY at >80% identical per module) | agent / human read; `validate_course.py briefs` |
+| No open fix sweep: a corrected claim is corrected on every surface, and every image is newer than its HTML source | HARD | `validate_course.py fixes` + `tools/fix_sweep.py` |
+| **Prose tics stay under their measured rate: negation-then-reversal, a reused metaphor frame, a repeated sentence opener** | ADVISORY | `tools/ai_tells.py` |
+
+**The prose-tics row, concretely.** The em-dash rule caught the tell everyone knows about. Reading
+five shipped courses end to end surfaced three it misses, and the first is far more damaging than
+em-dashes because it is a *sentence shape*, not a character:
+
+1. **Negation-then-reversal** — *"A monitor that only runs when you remember to invoke it **is not a
+   monitor. It is** a rumor with a command line."* The negated half carries no information; the
+   sentence is stronger without it. ~330 instances across the five courses, roughly one per lesson,
+   and the steady rhythm is what reads as machine-written. Measured as a rate: the worst course sat
+   at 0.87 per 1k words before remediation and 0.65 after; the best is 0.14.
+2. **A reused metaphor frame** — one course reached for the same figure **19 times**: a plan
+   *"wearing an engineering costume"*, *"a judgment lesson wearing a build lesson's clothes"*, *"a
+   preference in a suit"*, *"a preference wearing a lab coat"*, *"a rumour with good posture"*,
+   *"the same mistake wearing different hats"*. Any one is good writing. Nineteen is one idea.
+3. **A repeated sentence opener** — *"Here is the …"* opened **34** sentences in one course,
+   including the second paragraph of four different lessons.
+
+**Two rules for fixing them, both learned the hard way.** First, *keep the load-bearing instances*:
+"chargeback fraud is not reduced, it is structurally impossible" is the sentence doing the teaching,
+because ruling out the wrong model **is** the lesson. Roughly half of every course's hits are of
+this kind, which is exactly why this row is ADVISORY and `ai_tells.py` prints sites rather than a
+verdict. Second, *vary the repair*: fixing all of them the same way (always dropping the negation,
+say) trades one tic for another. Use a mix — comma-merges, inversions, dropping the negation,
+semicolons, colons, restructures.
+
+**The skills-tag row, concretely.** The tags render on the learner's lesson card. They were derived
+from `module.teaches_skills`, so every lesson in a module got a byte-identical array *by
+construction* — 79 of 79 modules across the ten shipped courses. An audit filed the consequence: a
+31-lesson course of mostly Rust, TypeScript and Docker content credited Solana skills on every
+lesson, and its Docker-install lesson carried a slug the learner reads as "Program Development".
+Set `skills:` per brief (`lesson-brief-schema.md` §C). Read each lesson's tags back and ask whether
+a learner who finished *that* lesson has *those* skills.
+
+**The fix-sweep row, concretely.** `method/fix-protocol.md`. A correction applied at the filed line
+and nowhere else is how ~17% of a round-2 audit's findings were manufactured by round 1's fixes,
+including six shipped images still teaching models the prose beside them retracted. Open a sweep
+per corrected claim, close it when every surface is clean and every render is younger than its
+source.

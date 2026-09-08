@@ -5,7 +5,7 @@
       "edited_by_human": false
     },
     "manifest.json": {
-      "sha256": "d0302c3777b8f1e22e01dcb8a41906072103403fdcf7d6147e91c55907aee061",
+      "sha256": "fe6842c4812df19fe2b39c43fde6b438294dcaa171b9c0b9e3cfaa0f3d4095ff",
       "edited_by_human": false
     },
     "modules/00-offense/module.yaml": {
@@ -45,7 +45,7 @@
       "edited_by_human": false
     },
     "lessons/research/m03-l1-fuzzing-with-trident.research.yaml": {
-      "sha256": "35975afc83843b5899a50d0838b00aa025d82d41b8824fb3391ffdafa4cc91d1",
+      "sha256": "14af6f092071222b40e9b926bf44f02be3ace18031b6cb7b5df40bc23766bad5",
       "edited_by_human": false
     },
     "lessons/facts/m03-l1-fuzzing-with-trident.facts.md": {

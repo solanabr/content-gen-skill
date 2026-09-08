@@ -63,10 +63,19 @@ lesson:
   objectives:            # measurable, Bloom-tagged; 1-3 max
     - {bloom: implement, statement: "derive a canonical PDA and write per-user account data"}
   prerequisites:         # lesson/skill ids (must already be taught — DAG check)
+  skills:                # what THIS lesson teaches, as DAG skill nodes or academy skill slugs → the learner-facing tags on the lesson card. OMIT and the export derives them from the MODULE, which gives every lesson in that module the same array (validator ADVISORY at >80% identical).
   hook:                  # the FELT problem / exploit / demo that opens it  → feeds voice pain-first opener
   concept_spec:          # the idea(s) to teach + the worked example to build (one new element per pass)
   artifact_spec:         # exactly what the learner builds this lesson (the ladder rung / accretion)
-  artifact:              # OPTIONAL structured accretion edge: {id, consumes: [earlier artifact ids], terminal: <reason>}
+  artifact:              # DERIVED VIEW of `ledger` below: {id, consumes: [earlier artifact ids], terminal: <reason>}
+  ledger:                # REQUIRED for kind: build — the continuity contract (see §I)
+    state_in:            #   one honest line: what is in the reader's tree as this lesson OPENS
+    state_out:           #   one honest line: what is in it when the lesson CLOSES
+    opens: []            #   course-relative paths this lesson tells the reader to open. MUST ALREADY EXIST.
+    emits: []            #   course-relative paths this lesson creates
+    provides: []         #   symbols defined here: "fn:derive_vault_pda" | {symbol:, sig: "(a, b)", terminal: <reason>}
+    consumes: []         #   symbols from EARLIER lessons this lesson uses
+    renames: []          #   [{from, to, since_lesson}] — from == to declares a SIGNATURE change
   verify:                # RECOMMENDED for build lessons: {command, expect} — the one-line paste-and-see proof (CI smoke tier)
   exercise_spec:         # the completion problem + the unguided challenge + acceptance criteria
   the_tradeoff:          # the cost / limit / "when not to use it"  → feeds voice always-name-the-tradeoff
@@ -84,19 +93,22 @@ lesson:
   color:                 # 1-3 grounded trivia/history beats to weave in (named incidents, dated numbers) — never invented
   est_length:            # THE length contract — the writer writes to this number. Course lessons: ~3000-4500w (keystone topics higher). Validator flags targets below 3000.
   # ── OPTIONAL Academy plugins (additive; see §H and references/academy-schema.md) ──
-  quiz_blocks:           # OPTIONAL: formative checks. A list of Academy quiz BLOCKS (each becomes one `type: quiz` block on export). Never gates the lesson.
+  quiz_blocks:           # OPTIONAL: formative checks. A list of Academy quiz BLOCKS (each becomes one `type: quiz` block INLINE in lesson.yaml on export — never a standalone *.quiz.yaml). Never gates the lesson.
     - key:               #   kebab block key (e.g. check). Optional; defaults to check / check-N.
       questions:
-        - id:            #   stable; correctness is keyed to this id, never option order
+        - id:            #   stable; correctness is keyed to this id, never option order. NEVER renamed after authoring.
           prompt:
-          multiSelect:   #   default false → exactly ONE correct option; true → ≥1
-          options:       #   3 preferred (≥2 min); each {id, label, correct}; put `feedback` on every WRONG option
-            - {id: a, label: "...", correct: false, feedback: "why it's wrong"}
-            - {id: b, label: "...", correct: true}
-            - {id: c, label: "...", correct: false, feedback: "why it's wrong"}
-          #   VARY the correct slot question to question — the validator HARD-fails a course
-          #   where >50% of correct answers share one position (the all-'A' failure)
-          explanation:   #   shown after answering — the paragraph that teaches the point
+          multiSelect:   #   default false → exactly ONE correct option. true only where the honest answer is a SET; then ≥5 options and 2 ≤ correct ≤ k-2.
+          options:       #   ≥4, and exactly 5 when the mean label is ≤70 chars. Opaque ids o1…o5. `feedback` on EVERY option, the correct one included.
+            - {id: o1, label: "...", correct: false, feedback: "why this one misses"}
+            - {id: o2, label: "...", correct: true,  feedback: "why this one is right"}
+            - {id: o3, label: "...", correct: false, feedback: "why this one misses"}
+            - {id: o4, label: "...", correct: false, feedback: "why this one misses"}
+            - {id: o5, label: "...", correct: false, feedback: "why this one misses"}
+          #   DO NOT THINK ABOUT OPTION ORDER. Write the options in whatever order they occur
+          #   to you; `tools/quiz_layout.py permute` assigns the final order from a hash and
+          #   records it in a ledger. Hand-ordering is a gate failure (validate_course.py quiz).
+          explanation:   #   REQUIRED. Shown after answering — the paragraph that teaches the point.
   coding_challenges:     # OPTIONAL: runnable exercises. Only for rust|typescript (the Academy runner compiles ONLY these). Bitcoin/CLI/Python/Solidity lessons take quizzes, not code blocks.
     - id:                #   kebab; becomes the exercise dir name on export
       language:          #   rust | typescript
@@ -220,6 +232,19 @@ course lesson consistent when they pass through the same voice.
 - **`flow.recap` is honest.** It calls back only what the previous lesson genuinely did or
   built. A recap that invents a prior experience breaks the spine; the writer must open on
   the real previous artifact/step.
+- **Every claim carries an expiry.** `lesson.research.claims[]` takes `verified_on` (ISO
+  date, HARD-required when `status: verified`), an optional `ttl_days` that may only
+  SHORTEN its kind's default, and a `recheck` holding the exact re-runnable probe. The
+  `kind` vocabulary is closed: `concept | number | api | code | onchain-number |
+  cli-default | version-pin | protocol-param`. Defaults live once in
+  `tools/course_lib.py` (`TTL_DAYS`); the workflow is `method/fact-recheck.md`; the gates
+  are `validate_course.py freshness`, `fact_freshness.py stale`, and `academy_export.py`,
+  which refuses to publish a past-TTL claim without `--allow-stale`.
+- **A `frozen_fact` that can change is a `claim`.** The facts file is a diff target for the
+  writer, not an expiry ledger — nothing in `frozen_facts` is on any clock. A version, a
+  rent figure, an endpoint, or a CLI default belongs in `claims[]` WITH a `recheck`, and
+  may then also be frozen. Eight of the ten courses in the corpus froze volatile numbers
+  and declared zero claims, which is precisely why the rent constants shipped wrong.
 
 
 ## H. Academy plugins — quizzes & coding challenges (optional, additive)
@@ -231,14 +256,34 @@ publishable Academy course; `tools/validate_course.py` validates the specs (`che
 `check_challenges`); `tools/verify_challenges.py` proves the runtime contract.
 
 - **Quizzes are formative — they never gate.** Only `assessment` gates the lesson (design-spine §6/§6.1).
-  A quiz checks understanding and gives immediate per-option feedback. `multiSelect:false` ⇒ exactly one
-  `correct`; put `feedback` on every wrong option and a teaching `explanation` on every question. Quizzes
-  are language-agnostic — a Bitcoin, EVM, or CLI lesson still earns one.
-  **Quality bar** (references/academy-schema.md §Quiz): scenario-driven, often two-part prompts tied to
-  what the learner just did; 3 options; distractors are REAL plausible misconceptions written in the same
-  length and register as the answer (never joke options, never a giveaway-long correct label); and the
-  correct answer's position varies roughly evenly across the course — `validate_course.py` HARD-fails
-  >50% one-slot skew and flags a correct-is-always-longest pattern.
+  **Artifacts gate; quizzes check.** A quiz gives immediate per-option feedback on understanding and
+  awards nothing. Quizzes are language-agnostic — a Bitcoin, EVM, or CLI lesson still earns one.
+  **Emit them INLINE**: a `quiz_blocks` entry becomes a `type: quiz` block inside `lesson.yaml`. A
+  standalone `*.quiz.yaml` lints green and is then silently dropped by the platform compiler, so the
+  lesson ships with no check and nothing reports it. `validate_course.py quiz` HARD-fails one.
+- **The authoring policy** (all HARD in `validate_course.py quiz`; full rationale in
+  references/academy-schema.md §Quiz):
+  - **≥4 options, and exactly 5 when the mean option label is ≤70 characters.** Short labels are cheap;
+    a 3-option question with one-line options is close to a coin flip.
+  - **`multiSelect: true` wherever the honest answer is a set.** No cap and no quota — but never convert
+    a single-answer question to multiSelect just to add difficulty. Its floor is 5 options with
+    2 ≤ correct ≤ k−2, so neither "all of them" nor "exactly one" is a guess that works.
+  - **`feedback` on EVERY option, the correct one included**, and an `explanation` on every question.
+    The correct option's feedback is where the "yes, and here is why that is the distinction" lands.
+  - **Opaque ids `o1…o5`**, so nothing implies id order is display order. Ids are NEVER renamed after
+    authoring: correctness, translations, and the layout ledger all bind on them.
+  - **Distractors are REAL misconceptions**, parallel to the answer in length and register. Never joke
+    options, never a giveaway-long correct label: the gate scores a content-blind learner's actual
+    strategies (longest, shortest, only-hedged, only-one-without-an-absolute, most-prompt-overlap) and
+    HARD-fails any that beats chance.
+- **DO NOT THINK ABOUT OPTION ORDER.** Write the options in whatever order they occur to you.
+  `tools/quiz_layout.py permute` assigns the final order from
+  `sha256(salt | courseId | lessonSlug | blockKey | questionId)` and records it in a ledger;
+  `validate_course.py quiz` HARD-fails a ledger that drifted. Hand-ordering is a gate failure.
+  This is the branch's governing law: **when a statistical property must hold, compute it in a tool;
+  never ask for it in a prompt.** The previous version of this section asked authors to "vary the
+  correct slot", and the wave-2 generator turned that into a per-lesson a→b→c rotation whose marginal
+  was perfect and whose *sequence* was 85-94% predictable.
 - **Coding challenges are runnable and RUST/TYPESCRIPT ONLY** (the Academy sandbox compiles only these).
   Author them where the lesson's real code is client-side Solana TS or a Rust/Anchor program. The **starter
   must fail** its tests and the **solution must pass** — that contract is the grade, so keep the solution
@@ -246,3 +291,94 @@ publishable Academy course; `tools/validate_course.py` validates the specs (`che
   <challenge-id>/` (starter/solution + tests.json); the brief only points at them. Three test modes exist —
   TS (boolean expression over `result = fn(input)`), Rust `standard` (value compare), and Rust `buildable`
   (compiles ⇒ pass, enforced by a hidden `mod verify` harness). See `references/academy-schema.md`.
+
+---
+
+## I. The continuity ledger (`lesson.ledger`) — what the reader's tree actually holds
+
+An independent audit of five courses this skill generated found the same defect in **every
+one of them**: a later lesson presumes an artifact the earlier lessons never produced, or
+produced under a different name. Four lessons in one course open on starter scaffolds the
+course never ships (`swap.js`, `toolkit/vault`, `bot/`, `opsbot.py`). A payments course
+claims a gasless path "lives inside the txreq app already"; it was never mounted. One course
+renames `init_vault` to `initialize` mid-way and later verbatim code keeps calling the old
+name. Another grows a helper from 2 arguments to 3 at `m02-l2`, and two later labs still call
+it with 2 — both crash before any transaction reaches the network.
+
+Every one was found by a human reading the course end to end. **None was catchable by any
+check this skill shipped**, because `artifact_spec` is prose and prose is not a graph.
+
+The ledger is that graph. It is REQUIRED on `kind: build` lessons.
+
+### The fields
+
+| field | what it holds | what it stops |
+|---|---|---|
+| `state_in` | one honest line: what is in the reader's tree as the lesson OPENS | a `flow.recap` that invents a prior experience |
+| `state_out` | the same line for the close | the next lesson's `state_in` disagreeing with it |
+| `opens` | course-relative paths this lesson tells the reader to open — **they must already exist** | `cd toolkit/vault` on a scaffold nobody shipped |
+| `emits` | course-relative paths this lesson creates | the same, from the other side |
+| `provides` | symbols defined here | a capstone that needs a pool no lesson creates |
+| `consumes` | symbols from EARLIER lessons used here | using a helper before it is written |
+| `renames` | `[{from, to, since_lesson}]` | later code that kept the old name |
+
+**`opens` means MUST-ALREADY-EXIST.** That is the whole distinction from `emits`, and it is
+what makes the check possible: a lesson listing the same path in both is telling the reader
+to run a file it has not written yet, which is a HARD failure. If the course genuinely ships
+the scaffold, declare it in `course.starter_assets` and the check passes.
+
+### Symbol grammar
+
+Every symbol is `<kind>:<name>`, from a closed set — an unrecognized kind is a HARD failure,
+because a typo'd kind silently disables every rule that depends on it:
+
+```
+fn:derive_vault_pda      type:VaultConfig     const:VAULT_SEED     ix:initialize
+cmd:npm run mint         file:scripts/mint.ts env:HELIUS_API_KEY   account:vault-pda
+artifact:anchor-vault    ← the bridge kind; see below
+```
+
+A `provides` entry may be a bare string or a dict carrying the signature:
+
+```yaml
+provides:
+  - fn:derive_vault_pda                                    # no signature declared
+  - {symbol: "fn:mint", sig: "(conn, payer, amount)"}      # arity 3
+  - {symbol: "fn:send", sig: "(payer, ixs, opts = {})"}    # arity 2..3 — a default widens the span
+  - {symbol: "fn:teardown", terminal: "debug aid; nothing downstream needs it"}
+```
+
+Declare `sig` wherever a later lesson calls the symbol. It is what lets
+`tools/continuity.py scan` compare real call sites against the shape you promised.
+
+### Renames, and the same-name signature change
+
+```yaml
+renames:
+  - {from: "fn:init_vault", to: "fn:initialize", since_lesson: m03-l2}
+  - {from: "fn:resolveAta", to: "fn:resolveAta", since_lesson: m02-l2}   # same name, new shape
+```
+
+`from == to` declares a **re-signature**: the name did not move, only its arguments did. It
+licenses the signature-drift rule and nothing else. Any lesson at or after `since_lesson`
+that still declares the OLD name is a HARD failure.
+
+### `artifact` is a VIEW over this, not a second system
+
+`brief.artifact.{id, consumes}` is read as `artifact:<id>` in the same graph, so the accretion
+ladder and the symbol ledger are one DAG. A course may declare its rungs in either shape (or
+both) and the two checks can never disagree about what was built when.
+`validate_course.py artifacts` owns the `artifact:` edges; `validate_course.py continuity`
+owns everything else, so each flag is printed exactly once.
+
+### What checks it
+
+- **`validate_course.py continuity`** — manifest-only, HARD, in `CHECKS` (so `all` and CI
+  tier 1 pick it up). A *missing* ledger is ADVISORY, never HARD: the ledger is new, ten real
+  courses predate it, and a gate that fails all ten on its first run is one people learn to
+  bypass. What is HARD is a ledger that **contradicts itself** — which every defect above
+  becomes, the moment the lesson says out loud what it expects to find.
+- **`tools/continuity.py`** — the half that needs the tree: shipped-path existence, the
+  rename scan over later code fences, and the call-site scan. **All advisory.** See that
+  file's header for the fence-scoping discipline it is written under
+  (`method/known-failure-modes.md` §1).

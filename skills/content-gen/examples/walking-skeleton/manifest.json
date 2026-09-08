@@ -192,6 +192,68 @@
         "dominant_job": "motivate",
         "voice_notes": "course opener; spine carries it; the felt 'no one can change it' shift is the hook.",
         "est_length": "900 words / ~9 min"
+      },
+      "research": {
+        "lesson_id": "hello-and-toolchain",
+        "status": "gathering",
+        "source_priority": [
+          "solana-dev",
+          "context7"
+        ],
+        "claims": [
+          {
+            "id": "C1",
+            "claim": "A Solana program is a stateless executable account; the local loop is build, deploy, invoke, read logs. `anchor build` writes target/deploy/<name>.so and `anchor test` on localnet starts a validator, deploys, runs the tests, then stops it.",
+            "kind": "concept",
+            "mcp": "solana-dev",
+            "query": "local validator development loop build deploy invoke read program logs",
+            "verify": "the four-step loop and the artifact path are what the current docs describe",
+            "status": "verified",
+            "evidence": "solana-dev: Anchor local-development + quickstart/local — 'The compiled artifact is written to /target/deploy/my_project.so' and anchor test 'Start a local Solana validator / Build and deploy / Run the tests / Stop'",
+            "value": null,
+            "recheck": "solana-dev: Solana_Documentation_Search 'anchor test localnet start validator build deploy'",
+            "verified_on": "2026-09-07"
+          },
+          {
+            "id": "C2",
+            "claim": "Which local backend `anchor test` starts. Anchor's CLI reference says Surfpool is now the default and `--validator legacy` selects solana-test-validator; the installation pages still say solana-test-validator. Pin the one this course's Anchor version actually does before writing the lab.",
+            "kind": "cli-default",
+            "mcp": "solana-dev",
+            "query": "anchor test local network backend surfpool validator legacy",
+            "verify": "run it against the declared anchor pin and record what starts",
+            "status": "gathering",
+            "evidence": "TODO: the docs disagree across pages — resolve against the pinned CLI",
+            "value": null,
+            "recheck": "`anchor test --help | grep -A2 validator` against references/pins.yaml's anchor pin"
+          },
+          {
+            "id": "C3",
+            "claim": "The exact command pair that streams program logs from a local validator.",
+            "kind": "cli-default",
+            "mcp": "local-execution",
+            "query": "solana config set -ul && solana logs",
+            "verify": "run both against a live local validator and paste the real first lines",
+            "status": "gathering",
+            "evidence": "TODO: docs show `solana config set -ul && solana logs`; run it",
+            "value": null,
+            "recheck": "`solana config set -ul && solana logs` with a validator up"
+          }
+        ],
+        "code_to_ground": [
+          {
+            "id": "K1",
+            "what": "the hello-world handler and its msg! line",
+            "autofixer": "required",
+            "status": "gathering"
+          }
+        ],
+        "open_questions": [
+          "Open on Surfpool or solana-test-validator? C2 decides it, and the answer changes the install step as well as the lab."
+        ],
+        "frozen_facts": [
+          "Programs are deployed as executable accounts; the compiled artifact is target/deploy/<name>.so.",
+          "A local validator throws its state away on restart — that is what makes it good for the loop and useless as a record."
+        ]
       }
     },
     {
@@ -236,6 +298,68 @@
         "dominant_job": "show-how",
         "voice_notes": "expository backbone; the 'no this.count' line is the aha.",
         "est_length": "1200 words / ~12 min"
+      },
+      "research": {
+        "lesson_id": "the-counter",
+        "status": "gathering",
+        "source_priority": [
+          "solana-dev",
+          "helius"
+        ],
+        "claims": [
+          {
+            "id": "C1",
+            "claim": "Programs hold no state between calls: state lives in accounts passed into the instruction, and the runtime lets only an account's owner program modify its data.",
+            "kind": "concept",
+            "mcp": "solana-dev",
+            "query": "Solana account model programs stateless owner may modify account data",
+            "verify": "both halves — state in accounts, and the owner-only write rule",
+            "status": "verified",
+            "evidence": "solana-dev: Solana core account docs; Helius 'A Hitchhiker's Guide to Solana Program Security' states the runtime enforces 'only allowing an account's owner to modify its data'",
+            "value": null,
+            "recheck": "solana-dev: Solana_Documentation_Search 'account model state in accounts owner modify data'",
+            "verified_on": "2026-09-07"
+          },
+          {
+            "id": "F2",
+            "claim": "Rent-exempt minimum for the counter account (8-byte discriminator + u64), in SOL.",
+            "kind": "onchain-number",
+            "mcp": "helius",
+            "query": "getMinimumBalanceForRentExemption for a 16-byte account",
+            "verify": "pull the live figure and record the exact value plus the cluster and date",
+            "status": "gathering",
+            "evidence": "TODO: helius getMinimumBalanceForRentExemption",
+            "value": null,
+            "recheck": "helius heliusChain getMinimumBalanceForRentExemption 16 --cluster devnet"
+          },
+          {
+            "id": "K3",
+            "claim": "The initialize + increment handlers compile and run under the declared toolchain.",
+            "kind": "code",
+            "mcp": "local-execution",
+            "query": "anchor build && anchor test for the counter program",
+            "verify": "verify_blocks.py compiles the lesson's rust blocks against the declared deps",
+            "status": "gathering",
+            "evidence": "TODO: run verify_blocks.py --lang rust on the drafted lesson",
+            "value": null,
+            "recheck": "python3 tools/verify_blocks.py <course> --lang rust"
+          }
+        ],
+        "code_to_ground": [
+          {
+            "id": "K1",
+            "what": "the account struct holding a single u64 count",
+            "autofixer": "required",
+            "status": "gathering"
+          }
+        ],
+        "open_questions": [
+          "Show the rent-exemption number here, or defer it to the PDA lesson where the learner pays it?"
+        ],
+        "frozen_facts": [
+          "Programs are stateless; state lives in accounts you pass in.",
+          "Only the owning program may write an account's data — that rule is what makes the account model safe, and it is enforced by the runtime, not by the program."
+        ]
       }
     },
     {
@@ -300,7 +424,9 @@
             "verify": "core docs: programs stateless, state in accounts",
             "status": "verified",
             "evidence": "solana-dev: Accounts / PDA docs",
-            "value": null
+            "value": null,
+            "recheck": "solana-dev: Solana_Documentation_Search 'account model state in accounts'",
+            "verified_on": "2026-09-07"
           },
           {
             "id": "C2",
@@ -311,7 +437,9 @@
             "verify": "API name + canonical-bump semantics current",
             "status": "verified",
             "evidence": "solana-dev: PDA section",
-            "value": null
+            "value": null,
+            "recheck": "solana-dev: Solana_Documentation_Search 'find_program_address canonical bump'",
+            "verified_on": "2026-09-07"
           },
           {
             "id": "F3",
@@ -322,7 +450,8 @@
             "verify": "pull live devnet figure; record exact value + date",
             "status": "gathering",
             "evidence": "TODO: helius getMinimumBalanceForRentExemption",
-            "value": null
+            "value": null,
+            "recheck": "helius heliusChain getMinimumBalanceForRentExemption 17 --cluster devnet"
           }
         ],
         "code_to_ground": [
@@ -407,7 +536,7 @@
         }
       ],
       "freshness_policy": {
-        "onchain_numbers_restale_after_days": 30,
+        "onchain_numbers_restale_after_days": 14,
         "applies_to": [
           "pda-per-user"
         ]

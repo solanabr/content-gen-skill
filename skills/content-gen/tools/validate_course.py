@@ -13,6 +13,10 @@ pass in references/quality-bar.md.
   ladder    artifact-rung monotonicity, difficulty band, cadence coverage
   capstone  capstone requires only skills taught earlier
   outcomes  every terminal outcome has a proof and vice-versa; module traces resolve
+  freshness per-claim expiry: verified_on present, nothing past its TTL, volatile kinds
+            carry a runnable `recheck` probe (see method/fact-recheck.md)
+  continuity  the reader's tree: nothing opened before it exists, no symbol that
+              changes shape mid-course, no old name surviving a declared rename
   all       run everything; exit 1 if any HARD fired
 
     python validate_course.py all     --course courses/<slug>
@@ -33,7 +37,11 @@ from course_lib import (
     BRIEF_CORE_KEYS, BRIEF_BUILD_KEYS, LESSON_KINDS, ID_RE, count_prose_emdashes,
     KIT_SURFACES, VISUAL_TYPES, VISUAL_FIELDS,
     WEAK_BLOOM_VERBS, PASSIVE_ASSESSMENT_RE, CHALLENGE_LANGS, CHALLENGE_BUILD_TYPES,
-    load_manifest, flatten_lessons, topo_sort,
+    SYMBOL_KINDS, SYMBOL_RE, LEDGER_LEGACY_KEYS,
+    load_manifest, flatten_lessons, topo_sort, course_ledgers,
+    CLAIM_KINDS, RECHECK_REQUIRED_KINDS, RECHECK_ADVISORY_KINDS, TTL_DAYS,
+    claim_freshness, claim_ttl, course_ttl_policy, parse_iso_date, today,
+    undated_deadline, FRESHNESS_EPOCH,
 )
 
 HARD = "[HARD] "
@@ -120,10 +128,14 @@ def check_dag(m: dict) -> dict:
 # ── academy plugins: quiz + coding-challenge specs (optional, additive) ─────────
 
 def check_quiz_blocks(b: dict, lid: str) -> list[str]:
-    """Validate a lesson brief's optional `quiz_blocks` against the Academy quiz schema
-    (references/academy-schema.md; schema/quiz.schema.json). Structural only. HARD:
-    stable unique ids, ≥2 options, correctness keyed to a stable option id, and the
-    single/multi correctness rule. ADVISORY: missing per-distractor feedback / explanation."""
+    """Per-brief structural validation of `quiz_blocks` (references/academy-schema.md).
+    Scope is deliberately narrow: the things that must hold for ONE brief to be a
+    well-formed document — stable unique ids, correctness keyed to a stable option id,
+    and the single/multi correctness rule.
+
+    The AUTHORING policy (option counts, feedback on every option, explanations,
+    em-dashes) and every statistical property live in `check_quiz`, which sees the
+    whole course. Duplicating them here would let the two disagree."""
     qbs = b.get("quiz_blocks")
     if qbs is None:
         return []
@@ -149,10 +161,8 @@ def check_quiz_blocks(b: dict, lid: str) -> list[str]:
                 flags.append(f"{HARD}brief {where} q'{qid}' has no prompt")
             opts = q.get("options") or []
             if len(opts) < 2:
-                flags.append(f"{HARD}brief {where} q'{qid}' needs ≥2 options")
-            elif len(opts) < 3:
-                flags.append(f"{ADV}brief {where} q'{qid}' has only 2 options — published courses "
-                             f"use 3 (a coin-flip quiz gates nothing)")
+                flags.append(f"{HARD}brief {where} q'{qid}' needs ≥2 options "
+                             f"(the authoring floor is 4 — see check_quiz)")
             oids = [str((o or {}).get("id", "")).strip() for o in opts]
             if any(not oid for oid in oids):
                 flags.append(f"{HARD}brief {where} q'{qid}' has an option with no id "
@@ -166,56 +176,76 @@ def check_quiz_blocks(b: dict, lid: str) -> list[str]:
                              f"correct option (has {n_correct})")
             if multi and n_correct < 1:
                 flags.append(f"{HARD}brief {where} q'{qid}' multi-select needs ≥1 correct option")
-            for o in opts:
-                o = o or {}
-                if o.get("correct") is False and not str(o.get("feedback", "")).strip():
-                    flags.append(f"{ADV}brief {where} q'{qid}' wrong option '{o.get('id')}' has no "
-                                 f"feedback (the platform shows it on a wrong pick)")
-            if not str(q.get("explanation", "")).strip():
-                flags.append(f"{ADV}brief {where} q'{qid}' has no explanation")
     return flags
 
 
-def check_quiz_distribution(m: dict) -> list[str]:
-    """Course-level answer-POSITION audit across every single-select quiz question.
-    Correctness is keyed to option id, but a learner sees positions — when the correct
-    answer sits in the same slot lesson after lesson (the all-'A' failure that shipped
-    once), the whole course is guessable without reading. HARD on >50% one-slot skew
-    once the sample is meaningful (≥6 questions); ADVISORY on the other classic tell,
-    the correct option being the longest label. Target: a roughly even spread."""
-    positions: list[int] = []
-    longest = 0
-    for l in m.get("lessons", []):
-        for qb in (l.get("brief", {}) or {}).get("quiz_blocks") or []:
-            for q in (qb or {}).get("questions") or []:
-                q = q or {}
-                if q.get("multiSelect"):
-                    continue
-                opts = [o or {} for o in (q.get("options") or [])]
-                idx = [i for i, o in enumerate(opts) if o.get("correct") is True]
-                if len(idx) != 1:
-                    continue  # structural breakage is already HARD in check_quiz_blocks
-                positions.append(idx[0])
-                lens = [len(str(o.get("label", ""))) for o in opts]
-                if len(lens) >= 2 and lens[idx[0]] == max(lens) and lens.count(max(lens)) == 1:
-                    longest += 1
-    n = len(positions)
-    if n < 6:
-        return []
+def check_quiz(m: dict) -> dict:
+    """The course-wide quiz gate. Statistics and authoring policy, in one place.
+
+    This replaces `check_quiz_distribution`, which HARD-failed ">50% of keys in one
+    slot" and nothing else. That gate was satisfiable by instruction, and it was:
+    `content/wave2/_briefs_emit.wf.js` told the model to seed each module's first
+    answer at `mi % 3` and rotate forward. Every wave-2 course came out
+    near-perfectly balanced on the marginal the gate measured, and near-perfectly
+    PREDICTABLE on the sequence it did not — best order-1 Markov accuracy 85.4%,
+    86.2%, 92.0%, 94.0% against 39.6% for an honest shuffle.
+
+        THE LAW: when a statistical property must hold, COMPUTE IT IN A TOOL.
+        Never ask for it in a prompt. A stronger instruction produces a different
+        artifact, not randomness. Option order is assigned by
+        `tools/quiz_layout.py permute`; hand-ordering is a gate failure.
+
+    Every number here comes from `tools/quiz_metrics.py`, which is also what
+    `quiz_layout.py report` prints, so the gate and the report cannot disagree.
+    Severity maps straight across: metric ERROR -> HARD, metric WARN -> ADVISORY.
+
+    A metric under its sample floor reports "INCONCLUSIVE, not passed" and names
+    what it could not rule out. The old gate returned [] below n=6; that quiet pass
+    is the failure mode this check exists to remove.
+
+    Ledger asymmetry: an ABSENT layout ledger is advisory (the course simply has not
+    been through `permute` yet, and the statistics above still judge it), but a
+    DRIFTED or forged ledger is HARD — that is someone hand-ordering after the fact.
+    """
+    import quiz_metrics
+    import quiz_layout
+
+    rep = quiz_metrics.analyse(m)
     flags: list[str] = []
-    counts: dict[int, int] = {}
-    for p in positions:
-        counts[p] = counts.get(p, 0) + 1
-    top_pos, top_n = max(counts.items(), key=lambda kv: kv[1])
-    if top_n / n > 0.5:
-        dist = {p + 1: c for p, c in sorted(counts.items())}
-        flags.append(f"{HARD}quiz correct answers are position-skewed: {top_n}/{n} sit at option "
-                     f"position {top_pos + 1} (distribution {dist}) — spread them roughly evenly; "
-                     f"a fixed slot makes every quiz guessable without reading")
-    if longest / n > 0.7:
-        flags.append(f"{ADV}the correct option has the longest label in {longest}/{n} single-select "
-                     f"questions — write distractors matching the answer's length and register")
-    return flags
+    for f in rep.findings:
+        prefix = HARD if f.severity == quiz_metrics.ERROR else ADV
+        flags.append(f"{prefix}quiz {f.metric}: {f.message}")
+
+    if rep.questions:
+        for dup in quiz_layout.check_addressing(m):
+            flags.append(f"{HARD}quiz duplicate question address {dup} — question ids are not "
+                         f"unique within a course, so the layout ledger is keyed on "
+                         f"(courseId, lesson, block, question); this pair collides")
+        problems = quiz_layout.verify(m)
+        if problems and quiz_layout.LEDGER_KEY not in m:
+            flags.append(f"{ADV}quiz layout: {problems[0]}")
+        else:
+            for p in problems:
+                flags.append(f"{HARD}quiz layout: {p}")
+
+    if not flags:
+        flags.append(f"ok: {len(rep.questions)} quiz question(s), every metric clean")
+    return _result("quiz", flags)
+
+
+def check_quiz_files(course_dir) -> dict:
+    """Quizzes ship INLINE in `lesson.yaml`. A standalone `*.quiz.yaml` lints green
+    and the platform compiler silently drops it, so the lesson ships with no check
+    at all — the worst possible failure, because nothing reports it."""
+    from pathlib import Path as _P
+    root = _P(course_dir)
+    stray = sorted(p for p in root.rglob("*.quiz.yaml"))
+    if not stray:
+        return _result("quiz-files", ["ok: no standalone quiz files"])
+    return _result("quiz-files", [
+        f"{HARD}standalone quiz file {p.relative_to(root)} — quizzes are emitted INLINE as a "
+        f"`type: quiz` block in lesson.yaml; a `*.quiz.yaml` lints green and is then silently "
+        f"dropped by the platform compiler" for p in stray])
 
 
 def check_coding_challenges(b: dict, lid: str) -> list[str]:
@@ -315,6 +345,12 @@ def check_briefs(m: dict) -> dict:
                 flags.append(f"{HARD}brief {lid} carries corpus signature '{sig}' — learn the move, "
                              f"never reuse the artifact/phrase (forms/course.md §Corpus stance)")
 
+        sk = b.get("skills")
+        if sk is not None and (not isinstance(sk, list)
+                               or any(not isinstance(x, str) or not x.strip() for x in sk)):
+            flags.append(f"{HARD}brief {lid} skills must be a list of non-empty strings "
+                         f"(DAG skill nodes or academy skill slugs): {sk!r}")
+
         d = b.get("difficulty")
         if isinstance(d, int) and not (1 <= d <= 3):
             flags.append(f"{ADV}brief {lid} difficulty {d} out of 1-3")
@@ -336,10 +372,64 @@ def check_briefs(m: dict) -> dict:
                          f"~{LESSON_TARGET_MIN}-4500w (forms/course.md). Raise the target.")
 
         # Optional Academy plugins (additive): validate their specs if present.
+        # Course-wide quiz policy + statistics live in check_quiz, not here.
         flags += check_quiz_blocks(b, lid)
         flags += check_coding_challenges(b, lid)
-    flags += check_quiz_distribution(m)
+
+    flags += _skill_tag_advisory(m)
     return _result("briefs", flags)
+
+
+# A module's lessons are allowed to share tags; a whole module sharing ONE array is the
+# signature of nobody having set them. Floor of 3 because a 2-lesson module is a single
+# pair — no signal, and the house rule is that a metric under its sample floor says so
+# rather than firing anyway.
+SKILL_TAG_IDENTICAL_MAX = 0.8
+SKILL_TAG_MIN_LESSONS = 3
+
+
+def _skill_tag_advisory(m: dict) -> list[str]:
+    """ADVISORY when >80% of a module's lessons carry byte-identical skill tags.
+
+    A lesson's `skills` are learner-facing: the Academy renders them as the labels on the
+    lesson card. They used to be derived from `mod['teaches_skills']` alone, which made
+    every lesson in a module identical BY CONSTRUCTION — measured at 79/79 modules across
+    the ten shipped courses, and filed as an audit major when a 31-lesson Rust/TS/Docker
+    course tagged its Docker-install lesson with a slug reading "Program Development".
+
+    The tags are computed by importing `academy_export._skills_for`, the same function the
+    export calls, so this gate and the emitted YAML can never disagree about what a lesson
+    is tagged with. Setting `skills:` on the briefs is what clears the flag."""
+    lessons = m.get("lessons", [])
+    modules = m.get("modules", [])
+    if not lessons or not modules:
+        return []
+    try:
+        from academy_export import _academy_cfg, _skills_for
+    except Exception:                                             # noqa: BLE001
+        return []
+    cfg = _academy_cfg(m, {})
+    by_mod: dict[str, dict] = {mod["id"]: mod for mod in modules if "id" in mod}
+    groups: dict[str, list[tuple]] = {}
+    for l in lessons:
+        mid = l.get("module")
+        if mid not in by_mod:
+            continue
+        groups.setdefault(mid, []).append(
+            tuple(_skills_for(l.get("brief", {}) or {}, by_mod[mid], cfg)))
+    flags = []
+    for mid, tags in groups.items():
+        if len(tags) < SKILL_TAG_MIN_LESSONS:
+            continue
+        top = max(set(tags), key=tags.count)
+        n = tags.count(top)
+        if n / len(tags) > SKILL_TAG_IDENTICAL_MAX:
+            flags.append(f"{ADV}module {mid}: {n} of {len(tags)} lessons carry byte-identical "
+                         f"skill tags {list(top) or '[]'} — the signature of tags nobody set "
+                         f"per lesson (they are derived from the MODULE unless a brief sets "
+                         f"`skills:`). A lesson's tags name what THAT lesson teaches "
+                         f"(lesson-brief-schema §C; quality-bar JUDGE row).")
+    return flags
 
 
 def _has_doing_verb(s: str) -> bool:
@@ -736,13 +826,41 @@ def check_drafts(course_dir, m: dict | None = None) -> dict:
 
 def check_research(m: dict) -> dict:
     """Kit dispatch is literal (research-grounding.md): a verified claim must cite a
-    kit surface; briefed lessons without a research scaffold are flagged."""
+    kit surface, and every briefed lesson carries a research scaffold.
+
+    The missing-scaffold case was advisory until 2026-09-07. Advisory meant "the
+    lesson was written from the model's memory and nobody recorded where anything
+    came from", which is the same class of defect as an unrunnable code block: it
+    ships, it reads fine, and it is wrong. Grounding is mandatory (SKILL.md step 9,
+    quality-bar.md §5), so the gate now says so.
+
+    But it says so PROPORTIONATELY. A blanket HARD on the missing case red-lined
+    every course written before the requirement existed, including the skill's own
+    bundled examples, and a permanently-red check is one people learn to pass with
+    `|| true`. Only 20 of 223 research files in the corpus carry claims at all and
+    8 of 10 courses declare none, so a blanket HARD fails the corpus instead of
+    improving it -- the same Goodhart trap the quiz rotation came from.
+
+    Severity therefore keys off whether the COURSE adopted scaffolds at all. Some
+    lessons grounded and others not is a real gap: HARD. None at all predates the
+    requirement: one advisory naming the set. A new course inherits HARD the moment
+    its first scaffold lands, which is what the promotion was actually reaching for."""
     flags: list[str] = []
-    for l in m.get("lessons", []):
+    lessons = m.get("lessons", [])
+    adopted = any(l.get("research") for l in lessons)
+    missing = [l.get("id", "?") for l in lessons if not l.get("research")]
+    if missing and not adopted:
+        flags.append(f"research scaffolds absent course-wide ({len(missing)} lesson(s)) — this "
+                     f"course predates SKILL.md step 9; ground it on the next content pass "
+                     f"(references/research-grounding.md)")
+    for l in lessons:
         lid = l.get("id", "?")
         r = l.get("research")
         if not r:
-            flags.append(f"{ADV}lesson {lid} has no research scaffold (SKILL.md step 9 is per-lesson)")
+            if adopted:
+                flags.append(f"{HARD}lesson {lid} has no research scaffold while sibling lessons "
+                             f"in this course do — grounding is per-lesson, not per-course "
+                             f"(references/research-grounding.md)")
             continue
         for c in r.get("claims", []):
             surf = str(c.get("mcp", ""))
@@ -753,17 +871,121 @@ def check_research(m: dict) -> dict:
     return _result("research", flags)
 
 
+def check_freshness(m: dict, as_of=None) -> dict:
+    """Per-claim expiry: the publish-time gate on facts that were true when written.
+
+    `check_research` proves a claim was grounded ONCE. Nothing proved it was still true
+    the day it shipped, and an audit of five generated courses found six defects that were
+    all that same hole: rent constants matching no live cluster, a rent mechanism the
+    runtime now rejects, a dead API taught as live, an archived repo called "the living
+    reference". Every one was verified once and then trusted forever.
+
+    HARD
+      - status verified with no obtainable date  (after the backfill window closes)
+      - any live claim past its TTL              ← forces a re-probe, not a silent re-ship
+      - onchain-number / cli-default / protocol-param / version-pin with no `recheck`,
+        because an un-runnable probe is not a probe
+      - a per-claim `ttl_days` that LENGTHENS its kind default, or an unknown `kind`
+    ADVISORY
+      - past 0.75x TTL (schedule the re-probe before it ambushes a publish)
+      - no `kind` (the claim inherits the volatile 30-day default)
+      - an api/number claim citing a URL with no `recheck` (a cited URL is a free probe,
+        and defect #4 was a cited URL that stopped resolving)
+      - a research scaffold with frozen_facts and zero claims — the gate is SILENT there
+        because nothing is declared, not because the facts are fresh. Eight of the ten
+        courses in the corpus are in exactly that state.
+
+    Dates and TTLs come from course_lib so this and `fact_freshness.py stale` and
+    `academy_export.py` can never disagree about what "stale" means.
+    """
+    flags: list[str] = []
+    as_of = as_of or today()
+    deadline = undated_deadline()
+    backfill_open = as_of < deadline
+    pol = course_ttl_policy(m)
+    if pol["declared"] and pol["days"] and pol["days"] > TTL_DAYS["onchain-number"]:
+        flags.append(f"{ADV}cadence.release.freshness_policy asks for "
+                     f"{pol['declared']}d on on-chain numbers but the kind default is "
+                     f"{TTL_DAYS['onchain-number']}d — a policy may only shorten, so the "
+                     f"default applies (course_lib.TTL_DAYS)")
+    n_claims = 0
+    for l in m.get("lessons", []) or []:
+        lid = l.get("id", "?")
+        r = l.get("research") or {}
+        claims = [c for c in (r.get("claims") or []) if isinstance(c, dict)]
+        if r and not claims and r.get("frozen_facts"):
+            flags.append(f"{ADV}lesson {lid}: research scaffold declares "
+                         f"{len(r['frozen_facts'])} frozen_fact(s) and ZERO claims — nothing "
+                         f"here is on any expiry clock; promote the volatile ones to claims[]")
+        for c in claims:
+            n_claims += 1
+            cid = c.get("id", "?")
+            f = claim_freshness(c, as_of, policy=pol, lesson_id=lid)
+            where = f"lesson {lid} claim {cid}"
+
+            kind = c.get("kind")
+            if kind is None:
+                flags.append(f"{ADV}{where}: no kind — it inherits the volatile "
+                             f"{f['ttl']}-day default; declare one of {sorted(CLAIM_KINDS)}")
+            elif kind not in CLAIM_KINDS:
+                flags.append(f"{HARD}{where}: unknown kind '{kind}' — the vocabulary is "
+                             f"closed ({sorted(CLAIM_KINDS)})")
+
+            own = c.get("ttl_days")
+            if isinstance(own, int) and own > f["kind_ttl"]:
+                flags.append(f"{HARD}{where}: ttl_days={own} lengthens the {kind} default of "
+                             f"{f['kind_ttl']}d — a claim may only SHORTEN its kind's TTL")
+
+            if f["provenance"] == "malformed":
+                flags.append(f"{HARD}{where}: verified_on={c.get('verified_on')!r} is not an "
+                             f"ISO YYYY-MM-DD date")
+            elif f["live"] and f["undated"]:
+                msg = (f"{where}: status={f['status']} with no verified_on and no dispatch date "
+                       f"in evidence — 'verified' with no date is a mood, not a measurement")
+                flags.append((f"{ADV}{msg}; backfill or re-probe before {deadline.isoformat()}"
+                              if backfill_open else f"{HARD}{msg}"))
+
+            if f["live"] and f["state"] == "stale":
+                flags.append(f"{HARD}{where}: last verified {f['verified_on'] or 'never'} — "
+                             f"{f['age_days']}d old against a {f['ttl']}d TTL for kind "
+                             f"'{kind or 'unset'}'. Re-probe (fact_freshness.py probes) and "
+                             f"update verified_on; do not re-ship it unread")
+            elif f["live"] and f["state"] == "aging":
+                flags.append(f"{ADV}{where}: {f['age_days']}d of a {f['ttl']}d TTL used — "
+                             f"expires {f['days_left']}d from now; schedule the re-probe")
+
+            if not f["recheck"]:
+                if kind in RECHECK_REQUIRED_KINDS:
+                    flags.append(f"{HARD}{where}: kind '{kind}' with no `recheck` — this value "
+                                 f"is read off a machine, so record the exact re-runnable probe "
+                                 f"(an RPC call, a curl, a --version), not prose")
+                elif kind in RECHECK_ADVISORY_KINDS and f["urls"]:
+                    flags.append(f"{ADV}{where}: cites {f['urls'][0]} and carries no `recheck` — "
+                                 f"a cited URL is a free probe, and a cited URL that stopped "
+                                 f"resolving is exactly how a dead API shipped as live")
+
+    if not flags:
+        return _result("freshness", [f"ok: {n_claims} claim(s), none past TTL as of "
+                                     f"{as_of.isoformat()}"])
+    return _result("freshness", flags)
+
+
 def check_artifacts(m: dict) -> dict:
     """The accretion graph: 'the toolkit becomes the bot' as a checkable DAG.
-    Structured artifact edges are optional; once any lesson declares one, edges must
-    run forward and non-terminal artifacts should be consumed downstream."""
+
+    This is a VIEW over the continuity ledger, not a second system: it reads the
+    `artifact:`-kind symbols out of `course_ledgers(m)`, which is where
+    `brief.artifact.{id,consumes}` and `brief.ledger.{provides,consumes}` both land.
+    One graph means a course can declare its ladder in either shape (or both) and
+    the two checks can never disagree about what was built when."""
     flags: list[str] = []
-    flat = flatten_lessons(m)
+    leds = course_ledgers(m)
     declared = []
-    for i, l in enumerate(flat):
-        art = l.get("brief", {}).get("artifact")
-        if isinstance(art, dict) and art.get("id"):
-            declared.append((art["id"], l["id"], i, art.get("consumes") or [], art.get("terminal")))
+    for i, led in enumerate(leds):
+        for p in led["provides"]:
+            if p["kind"] == "artifact":
+                cons = [c["name"] for c in led["consumes"] if c["kind"] == "artifact"]
+                declared.append((p["name"], led["lesson"], i, cons, p["terminal"]))
     if not declared:
         return _result("artifacts", ["ok: no structured artifact graph (prose artifact_spec only)"])
     pos = {}
@@ -787,6 +1009,218 @@ def check_artifacts(m: dict) -> dict:
             flags.append(f"{ADV}artifact '{aid}' ({lid}) is consumed by nothing downstream — wire it "
                          f"in or flag terminal: <reason> ('the toolkit becomes the bot')")
     return _result("artifacts", flags)
+
+
+# ── continuity ─────────────────────────────────────────────────────────────────
+
+_STOP = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "at", "is", "are", "was",
+         "with", "that", "this", "it", "its", "for", "from", "you", "your", "has", "have",
+         "one", "two", "but", "not", "now", "still", "only", "just", "already", "plus",
+         "com", "para", "que", "uma", "seu", "sua", "dos", "das", "por", "como", "mas"}
+
+
+def _tokens(s: str) -> set:
+    return {t for t in re.split(r"[^a-z0-9_./-]+", s.lower()) if len(t) >= 3 and t not in _STOP}
+
+
+def _norm_path(p: str) -> str:
+    p = str(p).strip().strip("`").replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    return p.rstrip("/")
+
+
+def _path_covered(p: str, emitted: set) -> bool:
+    """Is `p` satisfied by something already in the reader's tree?
+
+    Directory-tolerant in BOTH directions on purpose: `cd toolkit/vault` is covered by
+    an earlier `emits: toolkit/vault/Anchor.toml`, and `opens: src/lib.rs` is covered by
+    an earlier `emits: src/`. Being generous here costs a missed flag; being strict
+    would manufacture a HARD failure on every correctly-built course that named a
+    directory instead of a file."""
+    if p in emitted:
+        return True
+    return any(e.startswith(p + "/") or p.startswith(e + "/") for e in emitted)
+
+
+def _rename_key(s: str) -> tuple:
+    """(kind_or_None, name) for a rename side. The kind prefix is optional here --
+    a rename reads naturally as `init_vault -> initialize`, and forcing `fn:` on both
+    sides buys nothing the name alone does not already identify."""
+    s = str(s or "").strip()
+    m = SYMBOL_RE.match(s)
+    if m and m.group(1) in SYMBOL_KINDS:
+        return (m.group(1), m.group(2).strip())
+    return (None, s)
+
+
+def _matches_rename(sym: dict, key: tuple) -> bool:
+    kind, name = key
+    return sym["name"] == name and (kind is None or sym["kind"] == kind)
+
+
+def check_continuity(m: dict) -> dict:
+    """The continuity gate: a lesson may not open on an artifact no earlier lesson
+    produced, and a symbol may not change shape behind the reader's back.
+
+    Every rule here is MANIFEST-ONLY -- it reads the declared ledger and nothing else.
+    The rules that need the tree (do the paths exist? does later verbatim code still
+    call the old name?) live in `continuity.py`, which is advisory.
+
+    CALIBRATION. A missing ledger is ADVISORY, never HARD. The ledger is new; ten real
+    courses predate it, and a gate that fails all ten on its first run is one people
+    learn to bypass rather than one they fix. What IS hard is a ledger that contradicts
+    itself -- because every defect this gate was built for (four lessons opening on
+    scaffolds the course never ships, a helper that grew an argument mid-course, a
+    capstone requiring a pool nobody created) is a contradiction, not an omission, the
+    moment the lesson says out loud what it expects to find."""
+    flags: list[str] = []
+    leds = course_ledgers(m)
+    if not leds:
+        return _result("continuity", ["ok: no lessons"])
+    lesson_at = {led["lesson"]: i for i, led in enumerate(leds)}
+    starter = {_norm_path(p) for p in (m.get("course", {}).get("starter_assets") or [])}
+
+    # 0. malformed declarations. A typo'd kind silently disables every rule below it,
+    #    so it is HARD rather than a quiet drop ("ids are contracts").
+    for led in leds:
+        for e in led["provides"] + led["consumes"]:
+            if e["error"]:
+                flags.append(f"{HARD}lesson {led['lesson']} ledger: {e['error']}")
+        for k in led["legacy"]:
+            flags.append(f"{ADV}lesson {led['lesson']} carries '{k}' — documented in "
+                         f"references/output-contract.md but never implemented; it is now "
+                         f"{LEDGER_LEGACY_KEYS[k]}")
+
+    declared_any = any(l["declared"] for l in leds)
+
+    # 1. renames: resolve the lesson, then forbid the old name at/after it.
+    renames = []          # (from_key, to_key, since_index, declaring_lesson)
+    for led in leds:
+        for r in led["renames"]:
+            frm, to = _rename_key(r.get("from")), _rename_key(r.get("to"))
+            since = r.get("since_lesson") or led["lesson"]
+            if not frm[1] or not to[1]:
+                flags.append(f"{HARD}lesson {led['lesson']} rename needs both from and to: {r!r}")
+                continue
+            if since not in lesson_at:
+                flags.append(f"{HARD}lesson {led['lesson']} rename since_lesson '{since}' "
+                             f"resolves to no lesson (typo?)")
+                continue
+            renames.append((frm, to, lesson_at[since], led["lesson"]))
+
+    for frm, to, since_i, at_lesson in renames:
+        if frm == to:
+            # from == to is a RE-SIGNATURE, not a rename: the name is unchanged and only
+            # its shape moved. It licenses the signature-drift rule below and nothing
+            # else -- forbidding the "old" name here would forbid the new one too.
+            continue
+        for j, led in enumerate(leds):
+            if j < since_i:
+                continue
+            for e in led["provides"] + led["consumes"]:
+                if _matches_rename(e, frm):
+                    flags.append(f"{HARD}lesson {led['lesson']} still uses '{e['symbol']}' after it "
+                                 f"was renamed to '{to[1]}' at {leds[since_i]['lesson']} "
+                                 f"(declared in {at_lesson}) — later code must use the new name")
+        if not any(_matches_rename(e, to)
+                   for led in leds[since_i:] for e in led["provides"]):
+            flags.append(f"{ADV}rename '{frm[1]}' -> '{to[1]}' (from {at_lesson}): nothing provides "
+                         f"the new name at or after {leds[since_i]['lesson']}")
+
+    # 2. symbols: consumed must be provided EARLIER.
+    provided_at: dict[str, list[tuple[int, dict]]] = {}
+    for i, led in enumerate(leds):
+        for p in led["provides"]:
+            if p["error"]:
+                continue
+            provided_at.setdefault(p["symbol"], []).append((i, p))
+
+    consumed_syms: set = set()
+    for i, led in enumerate(leds):
+        for c in led["consumes"]:
+            # `artifact:` edges are check_artifacts' half of this same graph. One graph,
+            # two views, and each flag printed exactly once.
+            if c["error"] or c["kind"] == "artifact":
+                continue
+            where = provided_at.get(c["symbol"])
+            if not where:
+                flags.append(f"{HARD}lesson {led['lesson']} consumes '{c['symbol']}' that no lesson "
+                             f"provides — the reader is asked to use something the course never built")
+            elif min(w[0] for w in where) >= i:
+                first = leds[min(w[0] for w in where)]["lesson"]
+                flags.append(f"{HARD}lesson {led['lesson']} consumes '{c['symbol']}' first provided "
+                             f"in {first}, which comes later — continuity runs forward only")
+            else:
+                consumed_syms.add(c["symbol"])
+
+    # 3. signature drift: the same name, two shapes, nobody told the reader.
+    renamed_names = {k[1] for r in renames for k in (r[0], r[1])}
+    for sym, where in provided_at.items():
+        if sym.startswith("artifact:"):
+            continue                                  # check_artifacts owns duplicate rungs
+        spans = {(p["lo"], p["hi"]) for _i, p in where if p["lo"] is not None}
+        if len(spans) > 1 and sym.split(":", 1)[-1] not in renamed_names:
+            lessons = ", ".join(leds[i]["lesson"] for i, _p in where)
+            flags.append(f"{HARD}'{sym}' is provided with {len(spans)} different signatures "
+                         f"({sorted(spans)}) across {lessons} — a symbol that changes shape "
+                         f"mid-course needs a renames: entry, or the later call sites break")
+        elif len(where) > 1 and len(spans) <= 1:
+            flags.append(f"{ADV}'{sym}' is provided by {len(where)} lessons "
+                         f"({', '.join(leds[i]['lesson'] for i, _p in where)}) — provide once, "
+                         f"consume after")
+
+    # 4. paths: a lesson may only OPEN what already exists.
+    emitted: set = set()
+    for i, led in enumerate(leds):
+        own_emits = {_norm_path(p) for p in led["emits"]}
+        own_emits |= {_norm_path(p["name"]) for p in led["provides"] if p["kind"] == "file"}
+        opens = [_norm_path(p) for p in led["opens"]]
+        opens += [_norm_path(c["name"]) for c in led["consumes"] if c["kind"] == "file"]
+        for p in opens:
+            if p in own_emits:
+                flags.append(f"{HARD}lesson {led['lesson']} opens '{p}' and also emits it — the reader "
+                             f"is told to run a file this lesson has not written yet. Ship it in "
+                             f"course.starter_assets, or open on the previous lesson's artifact")
+            elif not _path_covered(p, emitted | starter):
+                flags.append(f"{HARD}lesson {led['lesson']} opens '{p}', which no earlier lesson emits "
+                             f"and course.starter_assets does not ship")
+        emitted |= own_emits
+
+    # 5. ADVISORY: a rung nothing downstream picks up.
+    last = len(leds) - 1
+    for i, led in enumerate(leds):
+        for p in led["provides"]:
+            if p["error"] or p["kind"] == "artifact":
+                continue   # artifact rungs are check_artifacts' half of the same graph
+            if p["symbol"] not in consumed_syms and not p["terminal"] and i < last:
+                flags.append(f"{ADV}'{p['symbol']}' ({led['lesson']}) is consumed by nothing "
+                             f"downstream — wire it in, or mark it terminal: <reason>")
+
+    # 6. ADVISORY: the prose seam. state_in of N should describe state_out of N-1.
+    for i in range(1, len(leds)):
+        a, b = leds[i - 1]["state_out"], leds[i]["state_in"]
+        if not a or not b:
+            continue
+        ta, tb = _tokens(a), _tokens(b)
+        if not ta or not tb:
+            continue
+        overlap = len(ta & tb) / min(len(ta), len(tb))
+        if overlap < 0.2:
+            flags.append(f"{ADV}lesson {leds[i]['lesson']} state_in shares {overlap:.0%} of its "
+                         f"vocabulary with {leds[i-1]['lesson']} state_out — one of the two is "
+                         f"describing a tree the other did not leave behind")
+
+    # 7. coverage. ADVISORY by design; see the docstring.
+    missing = [l["lesson"] for l in leds if l["kind"] == "build" and not l["declared"]]
+    if missing and declared_any:
+        flags.append(f"{ADV}{len(missing)}/{len(leds)} build lesson(s) carry no ledger: "
+                     f"{', '.join(missing[:6])}{' …' if len(missing) > 6 else ''} — the gate can "
+                     f"only check what a lesson declares")
+    elif missing:
+        return _result("continuity", flags + [f"ok: no continuity ledger declared "
+                                              f"({len(missing)} build lesson(s) undeclared)"])
+    return _result("continuity", flags)
 
 
 def check_challenges(course_dir, m: dict | None = None) -> dict:
@@ -834,9 +1268,60 @@ def check_challenges(course_dir, m: dict | None = None) -> dict:
     return _result("challenges", flags)
 
 
-CHECKS = {"dag": check_dag, "briefs": check_briefs, "ladder": check_ladder,
+def check_fixes(course_dir) -> dict:
+    """No course exports mid-sweep (method/fix-protocol.md).
+
+    A correction is not finished when the filed line is fixed. It is finished when every
+    surface carrying the claim is fixed and every image rebuilt from a corrected source.
+    The round-2 audit measured the gap: **~17% of its findings were fallout from round-1
+    fixes** that landed at one line and missed the twin passage, the quiz feedback, the
+    alt text, the `visual-src` markup and the `<!-- spec -->` comment — headlined by six
+    shipped images still teaching models the prose beside them had retracted.
+
+    `fix_sweep.py plan` writes `fixes/<id>.yaml`; `fix_sweep.py close` flips it to
+    `status: closed` only when every listed surface is clean AND every listed render is
+    younger than its HTML source. Anything still `open` is HARD here, so the sweep cannot
+    be forgotten halfway — which is exactly how it was forgotten before."""
+    from pathlib import Path as _P
+    root = _P(course_dir)
+    try:
+        import fix_sweep
+    except Exception as e:                                        # noqa: BLE001
+        return _result("fixes", [f"{ADV}fix_sweep unavailable ({e}) — open fix sweeps "
+                                 f"cannot be checked"])
+    ledgers = fix_sweep.open_ledgers(root)
+    if not ledgers:
+        return _result("fixes", ["ok: no fix sweeps recorded"])
+    flags: list[str] = []
+    closed = 0
+    for p, d in ledgers:
+        fix = d.get("fix") or {}
+        fid = fix.get("id", p.stem)
+        if fix.get("status") == "closed":
+            closed += 1
+            continue
+        try:
+            fails, _warns = fix_sweep.verify(root, d)
+        except Exception as e:                                    # noqa: BLE001
+            fails = [f"ledger could not be verified: {type(e).__name__}: {e}"]
+        detail = f"; {len(fails)} surface(s) still unfixed: {fails[0]}" if fails else \
+                 "; every surface is clean — run `fix_sweep.py close` to close it"
+        flags.append(f"{HARD}fix sweep '{fid}' is still open (fixes/{p.name}){detail}")
+    if not flags:
+        flags.append(f"ok: {closed} fix sweep(s), all closed")
+    return _result("fixes", flags)
+
+
+CHECKS = {"dag": check_dag, "briefs": check_briefs, "quiz": check_quiz, "ladder": check_ladder,
           "capstone": check_capstone, "outcomes": check_outcomes,
-          "research": check_research, "artifacts": check_artifacts, "length": check_length}
+          "research": check_research, "freshness": check_freshness,
+          "artifacts": check_artifacts, "continuity": check_continuity,
+          "length": check_length, "fixes": check_fixes}
+
+# Checks that read the course TREE, not the manifest. They live in CHECKS so `all` and the
+# subcommand list pick them up for free; every runner passes a course dir for these names
+# and a manifest for the rest.
+COURSE_DIR_CHECKS = {"fixes"}
 
 
 # ── runner ──────────────────────────────────────────────────────────────────────
@@ -848,10 +1333,15 @@ def _print(res: dict) -> None:
         print("   - " + f)
 
 
-def run(m: dict, names: list[str]) -> int:
+def run(m: dict, names: list[str], course_dir=None) -> int:
     any_hard = False
     for n in names:
-        res = CHECKS[n](m)
+        if n in COURSE_DIR_CHECKS:
+            if course_dir is None:
+                continue                      # tree-only check; nothing to read from a manifest
+            res = CHECKS[n](course_dir)
+        else:
+            res = CHECKS[n](m)
         _print(res)
         any_hard = any_hard or res["hard"]
     print(f"\nGATE: {'FAIL (hard)' if any_hard else 'PASS'}")
@@ -1037,13 +1527,110 @@ def selftest() -> int:
         check(any("prose wall" in f for f in check_drafts(td)["flags"]),
               "700+ word prose wall -> drafts HARD")
 
-    # research: verified claim via non-kit surface
+    # research: severity keys off whether the course adopted scaffolds at all.
+    # None anywhere = predates the requirement, advisory. Some but not all = a real
+    # gap, HARD. Both cases must be asserted or the proportionality silently rots
+    # back into the blanket HARD that red-lined every legacy course.
     rg = _good_manifest()
+    check(any("absent course-wide" in f for f in check_research(rg)["flags"])
+          and not check_research(rg)["hard"],
+          "no scaffold anywhere -> research advisory, not HARD")
+    rg["lessons"][0]["research"] = {"claims": []}
+    check(any("while sibling lessons" in f for f in check_research(rg)["flags"])
+          and check_research(rg)["hard"],
+          "partially scaffolded course -> research HARD on the gaps")
+    for _l in rg["lessons"]:
+        _l["research"] = {"claims": []}
+    check(not check_research(rg)["hard"], "every lesson scaffolded -> research clean")
+    # verified claim via non-kit surface
     rg["lessons"][0]["research"] = {"claims": [
         {"id": "C1", "mcp": "canonical-record", "status": "verified"}]}
     check(check_research(rg)["hard"], "verified claim via non-kit surface -> research HARD")
     rg["lessons"][0]["research"]["claims"][0]["mcp"] = "solana-researcher"
     check(not check_research(rg)["hard"], "kit surface -> research clean")
+
+    # freshness: per-claim expiry (the anti-staleness gate)
+    import datetime as _fdt
+    NOW = _fdt.date(2026, 9, 20)          # inside the backfill window (epoch + 13d)
+    LATER = _fdt.date(2026, 11, 1)        # past it (epoch + 55d)
+
+    def _fresh(claim, when=NOW, extra=None):
+        fm = _good_manifest()
+        for _l in fm["lessons"]:
+            _l["research"] = {"claims": []}
+        fm["lessons"][0]["research"] = {"claims": [claim]}
+        if extra:
+            fm.update(extra)
+        return check_freshness(fm, when)
+
+    good = {"id": "C1", "kind": "onchain-number", "status": "verified",
+            "verified_on": "2026-09-18", "mcp": "helius",
+            "recheck": "rpc getMinimumBalanceForRentExemption 165"}
+    check(not _fresh(good)["hard"], "dated, in-TTL, probeable claim -> freshness clean")
+
+    stale_c = dict(good, verified_on="2026-08-01")
+    r = _fresh(stale_c)
+    check(r["hard"] and any("50d old against a 14d TTL" in f for f in r["flags"]),
+          "a claim past its TTL -> freshness HARD (the publish gate)")
+
+    aging_c = dict(good, verified_on="2026-09-08")
+    r = _fresh(aging_c)
+    check(not r["hard"] and any("TTL used" in f for f in r["flags"]),
+          "past 0.75x TTL -> advisory, not hard")
+
+    no_probe = {k: v for k, v in good.items() if k != "recheck"}
+    r = _fresh(no_probe)
+    check(r["hard"] and any("no `recheck`" in f for f in r["flags"]),
+          "an on-chain number with no runnable probe -> freshness HARD")
+    for _k in ("cli-default", "protocol-param", "version-pin"):
+        check(_fresh(dict(no_probe, kind=_k))["hard"],
+              f"kind '{_k}' with no recheck -> freshness HARD")
+
+    undated = {k: v for k, v in good.items() if k != "verified_on"}
+    r_in = _fresh(undated)
+    check(not r_in["hard"] and any("no verified_on" in f for f in r_in["flags"]),
+          "verified with no date, inside the backfill window -> advisory")
+    r_out = _fresh(undated, LATER)
+    check(r_out["hard"], "verified with no date, past the backfill window -> HARD")
+
+    inferred = dict(undated, evidence="https://x/y (dispatched 2026-09-18)")
+    check(not _fresh(inferred)["hard"] and
+          not any("no verified_on" in f for f in _fresh(inferred)["flags"]),
+          "a dispatch date in evidence satisfies the date requirement")
+
+    check(_fresh(dict(good, verified_on="09/18/2026"))["hard"],
+          "a non-ISO verified_on -> freshness HARD")
+    check(_fresh(dict(good, kind="on-chain-number"))["hard"],
+          "an unknown kind -> freshness HARD (closed vocabulary)")
+    check(_fresh(dict(good, ttl_days=365))["hard"],
+          "a per-claim ttl_days that lengthens the kind default -> freshness HARD")
+    check(not _fresh(dict(good, ttl_days=7))["hard"],
+          "a per-claim ttl_days that shortens is fine")
+
+    url_api = {"id": "C1", "kind": "api", "status": "verified", "verified_on": "2026-09-18",
+               "mcp": "solana-dev", "evidence": "https://station.jup.ag/docs/apis/swap-api"}
+    r = _fresh(url_api)
+    check(not r["hard"] and any("free probe" in f for f in r["flags"]),
+          "an api claim citing a URL with no recheck -> advisory (defect #4's shape)")
+
+    check(any("ZERO claims" in f for f in _fresh(
+        good, NOW, {"lessons": [{"id": "x", "module": "m-accounts", "order": 1, "brief": {},
+                                 "research": {"frozen_facts": ["890,880"]}}]})["flags"]),
+        "frozen_facts with no claims -> advisory that the gate is silent, not that it passed")
+
+    lax = {"cadence": {"release": {"schedule": [{"week": 1, "publish": ["the-counter"]}],
+                                   "freshness_policy": {
+                                       "onchain_numbers_restale_after_days": 90}}}}
+    check(any("may only shorten" in f for f in _fresh(good, NOW, lax)["flags"]),
+          "a freshness_policy longer than the kind default -> advisory that it is ignored")
+    tight = {"cadence": {"release": {"schedule": [{"week": 1, "publish": ["the-counter"]}],
+                                     "freshness_policy": {
+                                         "onchain_numbers_restale_after_days": 1}}}}
+    check(_fresh(good, NOW, tight)["hard"],
+          "a freshness_policy shorter than the kind default DOES tighten the gate")
+
+    check("freshness" in CHECKS and CHECKS["freshness"] is check_freshness,
+          "freshness is registered in CHECKS")
 
     # artifacts: forward consumption
     ag = _good_manifest()
@@ -1053,6 +1640,109 @@ def selftest() -> int:
     ag["lessons"][0]["brief"]["artifact"] = {"id": "tool-a", "consumes": []}
     ag["lessons"][1]["brief"]["artifact"] = {"id": "tool-b", "consumes": ["tool-a"]}
     check(not check_artifacts(ag)["hard"], "forward accretion graph -> artifacts clean")
+
+    # ── continuity ────────────────────────────────────────────────────────────
+    def _cont(a: dict | None = None, b: dict | None = None, course: dict | None = None):
+        g = _good_manifest()
+        if a is not None:
+            g["lessons"][0]["brief"]["ledger"] = a
+        if b is not None:
+            g["lessons"][1]["brief"]["ledger"] = b
+        if course:
+            g["course"].update(course)
+        return check_continuity(g)
+
+    # calibration: no ledger anywhere is never HARD -- ten real courses predate it
+    check(not check_continuity(_good_manifest())["hard"],
+          "no ledger declared -> continuity is not HARD (calibration)")
+    check(any("no continuity ledger" in f for f in check_continuity(_good_manifest())["flags"]),
+          "no ledger declared -> says so rather than claiming clean")
+
+    # a lesson consuming a symbol nothing provides
+    r = _cont(None, {"consumes": ["fn:derive_vault_pda"]})
+    check(r["hard"] and any("no lesson provides" in f for f in r["flags"]),
+          "consumes a symbol nobody provides -> continuity HARD")
+    # provided EARLIER is fine; provided LATER is not
+    check(not _cont({"provides": ["fn:derive_vault_pda"]},
+                    {"consumes": ["fn:derive_vault_pda"]})["hard"],
+          "consumes a symbol provided earlier -> clean")
+    r = _cont({"consumes": ["fn:derive_vault_pda"]}, {"provides": ["fn:derive_vault_pda"]})
+    check(r["hard"] and any("comes later" in f for f in r["flags"]),
+          "consumes a symbol provided later -> continuity HARD")
+
+    # opening a file no earlier lesson emits, and the starter-asset escape hatch
+    r = _cont(None, {"opens": ["swap.js"]})
+    check(r["hard"] and any("no earlier lesson emits" in f for f in r["flags"]),
+          "opens a path nobody emits -> continuity HARD (the swap.js defect)")
+    check(not _cont({"emits": ["swap.js"]}, {"opens": ["swap.js"]})["hard"],
+          "opens a path an earlier lesson emits -> clean")
+    check(not _cont(None, {"opens": ["swap.js"]}, {"starter_assets": ["swap.js"]})["hard"],
+          "opens a declared course starter asset -> clean")
+    check(not _cont({"emits": ["toolkit/vault/Anchor.toml"]}, {"opens": ["toolkit/vault"]})["hard"],
+          "opens a directory an earlier lesson emitted into -> clean")
+    r = _cont(None, {"opens": ["bot/main.py"], "emits": ["bot/main.py"]})
+    check(r["hard"] and any("and also emits it" in f for f in r["flags"]),
+          "told to run a file this same lesson writes -> continuity HARD")
+
+    # signature drift with no rename declared
+    r = _cont({"provides": [{"symbol": "fn:mint", "sig": "(a, b)"}]},
+              {"provides": [{"symbol": "fn:mint", "sig": "(a, b, c)"}]})
+    check(r["hard"] and any("different signatures" in f for f in r["flags"]),
+          "same symbol, two signatures, no rename -> continuity HARD")
+    r = _cont({"provides": [{"symbol": "fn:mint", "sig": "(a, b)"}]},
+              {"provides": [{"symbol": "fn:mint", "sig": "(a, b, c)"}],
+               "renames": [{"from": "fn:mint", "to": "fn:mint", "since_lesson": "pda-state"}]})
+    check(not r["hard"], "a declared rename licenses the signature change")
+
+    # the old name surviving a declared rename
+    r = _cont({"provides": ["fn:init_vault"]},
+              {"provides": ["fn:initialize"], "consumes": ["fn:init_vault"],
+               "renames": [{"from": "fn:init_vault", "to": "fn:initialize",
+                            "since_lesson": "pda-state"}]})
+    check(r["hard"] and any("still uses" in f for f in r["flags"]),
+          "old name used after a declared rename -> continuity HARD")
+    r = _cont(None, {"renames": [{"from": "a", "to": "b", "since_lesson": "nope"}]})
+    check(r["hard"] and any("resolves to no lesson" in f for f in r["flags"]),
+          "rename since_lesson typo -> continuity HARD")
+
+    # malformed declarations are HARD, not a silent hole
+    r = _cont({"provides": ["derive_vault_pda"]})
+    check(r["hard"] and any("<kind>:<name>" in f for f in r["flags"]),
+          "a symbol with no kind prefix -> continuity HARD")
+    r = _cont({"provides": ["func:x"]})
+    check(r["hard"] and any("unknown symbol kind" in f for f in r["flags"]),
+          "an unknown symbol kind -> continuity HARD")
+
+    # advisories
+    r = _cont({"provides": ["fn:helper"]}, {"provides": ["fn:other"]})
+    check(not r["hard"] and any("consumed by nothing downstream" in f for f in r["flags"]),
+          "a provides nobody consumes -> advisory")
+    r = _cont({"state_out": "a counter program that builds and passes its tests"},
+              {"state_in": "an empty directory, nothing written yet"})
+    check(not r["hard"] and any("state_in shares" in f for f in r["flags"]),
+          "state_in that does not describe the previous state_out -> advisory")
+    r = _cont({"state_out": "a counter program that builds and passes its tests"},
+              {"state_in": "the counter program from the previous lesson, tests passing"})
+    check(not any("state_in shares" in f for f in r["flags"]),
+          "an honest state_in seam -> no advisory")
+
+    # the three fields output-contract.md documented and nothing ever implemented
+    lg = _good_manifest()
+    lg["lessons"][0]["brief"]["carry_forward"] = "the counter"
+    r = check_continuity(lg)
+    check(not r["hard"] and any("never implemented" in f for f in r["flags"]),
+          "a brief written against the old output-contract fields is told where they went")
+
+    # ONE graph: an artifact edge and a ledger edge are the same graph
+    og = _good_manifest()
+    og["lessons"][0]["brief"]["artifact"] = {"id": "counter", "consumes": []}
+    og["lessons"][1]["brief"]["ledger"] = {"consumes": ["artifact:counter"],
+                                           "provides": ["artifact:vault"]}
+    check(not check_artifacts(og)["hard"] and not check_continuity(og)["hard"],
+          "a ledger consuming an artifact declared the legacy way resolves (one graph)")
+    og["lessons"][1]["brief"]["ledger"]["consumes"] = ["artifact:ghost"]
+    check(check_artifacts(og)["hard"],
+          "a ledger consuming an unknown artifact is caught by check_artifacts")
 
     # corpus signature in a brief
     cg = _good_manifest()
@@ -1076,9 +1766,10 @@ def selftest() -> int:
     qg = _good_manifest()
     qg["lessons"][0]["brief"]["quiz_blocks"] = [{"questions": [
         {"id": "q1", "prompt": "Base unit of SOL?", "multiSelect": False,
-         "options": [{"id": "a", "label": "Gwei", "correct": False, "feedback": "Ethereum's."},
-                     {"id": "b", "label": "Lamport", "correct": True},
-                     {"id": "c", "label": "Satoshi", "correct": False, "feedback": "Bitcoin's."}],
+         "options": [{"id": "o1", "label": "Gwei", "correct": False, "feedback": "Ethereum's."},
+                     {"id": "o2", "label": "Lamport", "correct": True, "feedback": "Right."},
+                     {"id": "o3", "label": "Satoshi", "correct": False, "feedback": "Bitcoin's."},
+                     {"id": "o4", "label": "Wei", "correct": False, "feedback": "Ethereum's."}],
          "explanation": "One SOL is 1e9 lamports."}]}]
     check(not check_briefs(qg)["hard"], "good quiz_blocks -> briefs clean")
     # single-select with two correct is HARD
@@ -1090,39 +1781,113 @@ def selftest() -> int:
     q3 = copy.deepcopy(qg)
     q3["lessons"][0]["brief"]["quiz_blocks"][0]["questions"][0]["options"][0].pop("id")
     check(check_briefs(q3)["hard"], "quiz option with no id -> briefs HARD")
-    # only 2 options is an advisory (published courses use 3)
-    q4 = copy.deepcopy(qg)
-    q4["lessons"][0]["brief"]["quiz_blocks"][0]["questions"][0]["options"].pop()
-    check(any("only 2 options" in f for f in check_briefs(q4)["flags"])
-          and not check_briefs(q4)["hard"], "2-option question -> advisory, not HARD")
+    # course-wide policy is check_quiz's job, never check_briefs'
+    check(not any("option" in f and "4" in f for f in check_briefs(qg)["flags"]),
+          "check_briefs no longer duplicates the course-wide option-count policy")
 
-    # course-wide answer-position skew: all-correct-at-slot-1 is HARD once n ≥ 6
-    def _q(qid, correct_at):
-        opts = [{"id": oid, "label": f"opt {oid}", "correct": i == correct_at,
-                 **({} if i == correct_at else {"feedback": "no"})}
-                for i, oid in enumerate("abc")]
-        return {"id": qid, "prompt": f"{qid}?", "options": opts, "explanation": "e"}
-    sk = _good_manifest()
-    sk["lessons"][0]["brief"]["quiz_blocks"] = [{"questions": [_q(f"q{i}", 0) for i in range(6)]}]
-    check(any("position-skewed" in f for f in check_briefs(sk)["flags"]),
-          "6 questions all correct at position 1 -> skew HARD")
-    sk["lessons"][0]["brief"]["quiz_blocks"] = [{"questions": [_q(f"q{i}", i % 3) for i in range(6)]}]
-    check(not any("position-skewed" in f for f in check_briefs(sk)["flags"]),
-          "even correct-position spread -> no skew flag")
-    # below the sample floor the skew gate stays quiet
-    sk["lessons"][0]["brief"]["quiz_blocks"] = [{"questions": [_q(f"q{i}", 0) for i in range(5)]}]
-    check(not any("position-skewed" in f for f in check_briefs(sk)["flags"]),
-          "5 questions -> under sample floor, no skew flag")
-    # longest-label tell is advisory
-    lt = _good_manifest()
-    lqs = []
-    for i in range(7):
-        qq = _q(f"q{i}", i % 3)
-        qq["options"][i % 3]["label"] = "a much longer and more detailed correct answer label"
-        lqs.append(qq)
-    lt["lessons"][0]["brief"]["quiz_blocks"] = [{"questions": lqs}]
-    check(any("longest label" in f for f in check_briefs(lt)["flags"]),
-          "correct-is-always-longest -> advisory")
+    # ── the three quiz regression fixtures (the point of this whole workstream) ──
+    # A shared question factory: 5 options, parallel labels whose LENGTH does not
+    # depend on which one is correct, feedback everywhere, an explanation.
+    import hashlib as _hl
+
+    def _qz(qid, correct_at, k=5):
+        base = ("the runtime charges rent-exempt lamports against the payer at creation "
+                "and refunds them when the account closes")
+        opts = []
+        for i in range(k):
+            n = 76 + int(_hl.sha256(f"{qid}|{i}".encode()).hexdigest(), 16) % 34
+            opts.append({"id": f"o{i + 1}", "label": base[:n], "correct": i == correct_at,
+                         "feedback": "why this option lands where it does"})
+        return {"id": qid, "prompt": f"{qid}: which account pays the rent here?",
+                "multiSelect": False, "options": opts,
+                "explanation": "a paragraph that teaches the point after answering"}
+
+    def _course_with(seq):
+        """A 2-module manifest carrying `seq` as its single-select key positions."""
+        mm = _good_manifest()
+        per = 3
+        blocks = [[], []]
+        for i, pos in enumerate(seq):
+            blocks[(i // per) % 2].append(_qz(f"q{i}", pos))
+        for li in (0, 1):
+            mm["lessons"][li]["brief"]["quiz_blocks"] = [{"key": "check", "questions": blocks[li]}]
+            mm["lessons"][li]["research"] = {"claims": []}
+        return mm
+
+    ROT = [i % 3 for i in range(60)]        # the exact `mi % 3` artifact that shipped
+    ONE = [0] * 60                          # the all-'A' failure the old gate was built for
+    HASH = [int(_hl.sha256(f"fx|{i}".encode()).hexdigest(), 16) % 5 for i in range(60)]
+
+    rot = check_quiz(_course_with(ROT))
+    check(rot["hard"], "FIXTURE 1: a perfect a->b->c rotation -> quiz HARD")
+    check(any("sequence" in f and f.startswith(HARD) for f in rot["flags"]),
+          "FIXTURE 1: it fails on sequential exploitability (the old gate PASSED it)")
+    one = check_quiz(_course_with(ONE))
+    check(one["hard"], "FIXTURE 2: an all-one-slot sequence -> quiz HARD")
+    check(any("marginal" in f and f.startswith(HARD) for f in one["flags"]),
+          "FIXTURE 2: it fails on the marginal")
+    hsh = check_quiz(_course_with(HASH))
+    check(not hsh["hard"], "FIXTURE 3: a hash-balanced sequence -> quiz clean\n     "
+          + "\n     ".join(f for f in hsh["flags"] if f.startswith(HARD)))
+
+    # promotions to HARD (all four were advisory or absent before 2026-09-07)
+    lg = _course_with(HASH)
+    for blk in (lg["lessons"][0]["brief"]["quiz_blocks"][0]["questions"]
+                + lg["lessons"][1]["brief"]["quiz_blocks"][0]["questions"]):
+        for o in blk["options"]:
+            if o["correct"]:
+                o["label"] = o["label"] + " and a further clarifying clause that runs on"
+            else:
+                o["label"] = o["label"][:70]
+    check(any("longest-correct" in f and f.startswith(HARD) for f in check_quiz(lg)["flags"]),
+          "correct-is-longest -> HARD (was advisory; 4 courses shipped at 91-97% with GATE: PASS)")
+    nf = _course_with(HASH)
+    nf["lessons"][0]["brief"]["quiz_blocks"][0]["questions"][0]["options"][0].pop("feedback")
+    check(any("quiz feedback" in f and f.startswith(HARD) for f in check_quiz(nf)["flags"]),
+          "an option with no feedback -> HARD (every option, correct one included)")
+    ne = _course_with(HASH)
+    ne["lessons"][0]["brief"]["quiz_blocks"][0]["questions"][0].pop("explanation")
+    check(any("quiz explanation" in f and f.startswith(HARD) for f in check_quiz(ne)["flags"]),
+          "a question with no explanation -> HARD")
+    fo = _course_with(HASH)
+    for q in fo["lessons"][0]["brief"]["quiz_blocks"][0]["questions"]:
+        q["options"] = q["options"][:3]
+    check(any("option-count" in f and f.startswith(HARD) for f in check_quiz(fo)["flags"]),
+          "fewer than 4 options -> HARD")
+    ed = _course_with(HASH)
+    ed["lessons"][0]["brief"]["quiz_blocks"][0]["questions"][0]["prompt"] = "an — em-dash"
+    check(any("em-dash" in f and f.startswith(HARD) for f in check_quiz(ed)["flags"]),
+          "an em-dash in quiz text -> HARD (794 ship across six courses today)")
+
+    # the small-sample rule: under the floor a metric says so, it never passes quietly
+    tiny = _good_manifest()
+    tiny["lessons"][0]["brief"]["quiz_blocks"] = [{"key": "check",
+                                                   "questions": [_qz("q1", 0), _qz("q2", 0)]}]
+    tf = check_quiz(tiny)["flags"]
+    check(any("INCONCLUSIVE, not passed" in f for f in tf),
+          "under the sample floor -> INCONCLUSIVE, not a silent pass (the old gate returned [])")
+    check(all("Cannot rule out:" in f for f in tf if "INCONCLUSIVE" in f),
+          "each INCONCLUSIVE names what it could not rule out")
+
+    # the layout ledger: absent is advisory, drifted is HARD
+    import quiz_layout as _ql
+    lm = _course_with(HASH)
+    check(any("layout" in f and f.startswith(ADV) for f in check_quiz(lm)["flags"]),
+          "no layout ledger -> advisory (the course has not been permuted yet)")
+    _ql.permute(lm, "fixture-salt")
+    check(not any("layout" in f for f in check_quiz(lm)["flags"]),
+          "after permute the ledger verifies clean")
+    lm["lessons"][0]["brief"]["quiz_blocks"][0]["questions"][0]["options"].reverse()
+    check(any("layout" in f and f.startswith(HARD) for f in check_quiz(lm)["flags"]),
+          "hand-ordering after the permute -> HARD")
+
+    # standalone *.quiz.yaml is HARD (lints green, then the compiler drops it)
+    with tempfile.TemporaryDirectory() as tq:
+        check(not check_quiz_files(tq)["hard"], "no standalone quiz files -> clean")
+        qd = _P(tq) / "lessons" / "intro"
+        qd.mkdir(parents=True)
+        (qd / "check.quiz.yaml").write_text("questions: []\n", "utf-8")
+        check(check_quiz_files(tq)["hard"], "a standalone *.quiz.yaml -> quiz-files HARD")
 
     # a good coding_challenge SPEC keeps briefs clean (file existence checked separately)
     cg2 = _good_manifest()
@@ -1156,6 +1921,57 @@ def selftest() -> int:
         (exdir / "tests.json").write_text('[]', "utf-8")
         check(check_challenges(td2, cm)["hard"], "empty tests.json array -> challenges HARD")
 
+    # ── skills-tag advisory: identical tags across a module ──────────────────────
+    st = _good_manifest()
+    st["academy"] = {"skills_map": {"account-model": "account-model",
+                                    "programs-instructions": "program-development",
+                                    "pdas": "pdas"}, "default_skills": []}
+    base = copy.deepcopy(st["lessons"][0])
+    for i in (2, 3):                      # 3 lessons in m-accounts, none setting `skills`
+        extra = copy.deepcopy(base)
+        extra["id"] = f"the-counter-{i}"
+        extra["order"] = i
+        extra["brief"]["id"] = extra["id"]
+        st["lessons"].append(extra)
+    fl = check_briefs(st)["flags"]
+    check(any("byte-identical skill tags" in f and f.startswith(ADV) for f in fl),
+          "a module whose lessons all derive the same tags -> briefs ADVISORY")
+    check(not check_briefs(st)["hard"], "the skills-tag flag is ADVISORY, never HARD")
+    for j, sk in ((0, ["account-model"]), (2, ["programs-instructions"]), (3, ["pdas"])):
+        st["lessons"][j]["brief"]["skills"] = sk
+    check(not any("byte-identical skill tags" in f for f in check_briefs(st)["flags"]),
+          "per-lesson brief `skills:` clears the flag")
+    two = _good_manifest()               # 1 lesson per module: under the sample floor
+    check(not any("byte-identical skill tags" in f for f in check_briefs(two)["flags"]),
+          "a module under 3 lessons is not flagged (one pair is not a signal)")
+    bs = _good_manifest()
+    bs["lessons"][0]["brief"]["skills"] = "pdas"
+    check(any("skills must be a list" in f for f in check_briefs(bs)["flags"]),
+          "a scalar `skills` -> briefs HARD (it becomes a YAML array on the lesson card)")
+
+    # ── fixes: no course exports mid-sweep ───────────────────────────────────────
+    import fix_sweep as _fs
+    with tempfile.TemporaryDirectory() as tf:
+        c = _P(tf) / "content" / "courses" / "demo"
+        (c / "lessons" / "drafts").mkdir(parents=True)
+        check(not check_fixes(c)["hard"], "no fixes/ dir -> fixes check clean")
+        (c / "lessons" / "drafts" / "m00-l1-x.md").write_text(
+            "# T\n\nthe cap is 200 pulls per 6 hours.\n", "utf-8")
+        _fs.cmd_plan(c, "200 pulls per 6 hours", "fix-cap", None, None, None)
+        r = check_fixes(c)
+        check(r["hard"] and any("still open" in f for f in r["flags"]),
+              "an open fix sweep -> fixes HARD (the course cannot export mid-sweep)")
+        check(any("still unfixed" in f for f in r["flags"]),
+              "the HARD flag names a surface that is still wrong, not just the ledger")
+        (c / "lessons" / "drafts" / "m00-l1-x.md").write_text(
+            "# T\n\nthe cap is whatever the vendor publishes today.\n", "utf-8")
+        check(check_fixes(c)["hard"],
+              "text fixed but the ledger still open -> still HARD (close it deliberately)")
+        check(_fs.cmd_check(c, "fix-cap", None, close=True) == 0, "close succeeds once clean")
+        check(not check_fixes(c)["hard"], "a closed sweep -> fixes clean")
+        check("fixes" in CHECKS and "fixes" in COURSE_DIR_CHECKS,
+              "check_fixes is registered in CHECKS as a course-dir check")
+
     print("\n" + ("VALIDATOR SELFTESTS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1
 
@@ -1180,12 +1996,22 @@ def main(argv=None) -> int:
         return 2
     m = load_manifest(src)
     names = list(CHECKS) if a.cmd == "all" else ([] if a.cmd in ("drafts", "challenges") else [a.cmd])
+    course_dir = getattr(a, "course", None)
     any_hard = False
     for n in names:
-        res = CHECKS[n](m)
+        if n in COURSE_DIR_CHECKS:
+            if not course_dir:
+                print(f"[skip] {n}: needs --course <dir> (it reads the course tree)")
+                continue
+            res = CHECKS[n](course_dir)
+        else:
+            res = CHECKS[n](m)
         _print(res)
         any_hard = any_hard or res["hard"]
-    course_dir = getattr(a, "course", None)
+    if course_dir and a.cmd in ("quiz", "all"):
+        res = check_quiz_files(course_dir)
+        _print(res)
+        any_hard = any_hard or res["hard"]
     if course_dir and a.cmd in ("drafts", "all"):
         res = check_drafts(course_dir, m)
         _print(res)
