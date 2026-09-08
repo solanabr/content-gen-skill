@@ -291,6 +291,69 @@
         "dominant_job": "show-how",
         "voice_notes": "security: be wary of Hotz reductive collapse — exploits are concrete, don't over-simplify the fix. Helius expository craft.",
         "est_length": "1300 words / ~13 min"
+      },
+      "research": {
+        "lesson_id": "the-exploit-mindset",
+        "status": "gathering",
+        "source_priority": [
+          "solana-dev",
+          "context7"
+        ],
+        "claims": [
+          {
+            "id": "C1",
+            "claim": "Missing access control — not checking an account's owner, or that the authority signed — is a named, published Solana attack class, not a lesson device.",
+            "kind": "concept",
+            "mcp": "solana-dev",
+            "query": "Solana program security attack vectors access control vulnerabilities",
+            "verify": "the taxonomy is published and access control is in it",
+            "status": "verified",
+            "evidence": "solana-dev: Helius 'A Hitchhiker's Guide to Solana Program Security' lists Access Control Vulnerabilities — 'failing to correctly implement access control checks, such as verifying an account's owner'",
+            "value": null,
+            "recheck": "solana-dev: Solana_Documentation_Search 'Solana program security attack vectors access control'",
+            "verified_on": "2026-09-07"
+          },
+          {
+            "id": "C2",
+            "claim": "Reentrancy is structurally limited on Solana: the runtime caps CPI depth and only an account's owner may modify its data, so the EVM reentrancy playbook does not transfer. Do not teach it as the headline risk.",
+            "kind": "concept",
+            "mcp": "solana-dev",
+            "query": "reentrancy Solana CPI depth limit account owner write rule",
+            "verify": "the limit exists and the reason is the execution model, not a convention",
+            "status": "verified",
+            "evidence": "solana-dev: Helius Hitchhiker's Guide — 'reentrancy is inherently limited on Solana... restricts CPIs to a maximum depth of four and enforces strict account rules'",
+            "value": null,
+            "recheck": "solana-dev: Solana_Documentation_Search 'reentrancy Solana CPI depth'",
+            "verified_on": "2026-09-07"
+          },
+          {
+            "id": "K3",
+            "claim": "The planted-vulnerability program builds, and the learner's exploit test really drains it, under the declared toolchain.",
+            "kind": "code",
+            "mcp": "local-execution",
+            "query": "build the vulnerable vault and run the exploit test",
+            "verify": "the exploit passes on the vulnerable build — a lesson whose exploit does not fire teaches the opposite of its point",
+            "status": "gathering",
+            "evidence": "TODO: run verify_challenges.py on this lesson's starter/solution pair",
+            "value": null,
+            "recheck": "python3 tools/verify_challenges.py <course>"
+          }
+        ],
+        "code_to_ground": [
+          {
+            "id": "K1",
+            "what": "the unguarded withdraw and the exploit test that calls it",
+            "autofixer": "required",
+            "status": "gathering"
+          }
+        ],
+        "open_questions": [
+          "How explicit to be about the 'only on code you own' boundary — a callout, or a beat?"
+        ],
+        "frozen_facts": [
+          "Access control failures are the published top attack class, not a teaching device.",
+          "Reentrancy is limited by the execution model here; importing the EVM threat model wholesale misleads."
+        ]
       }
     },
     {
@@ -331,6 +394,69 @@
         "dominant_job": "show-how",
         "voice_notes": "build-it-twice guest: native check then Anchor constraint; the 'two lines' callback to the exploit is the seam.",
         "est_length": "1300 words / ~13 min"
+      },
+      "research": {
+        "lesson_id": "signer-and-owner-checks",
+        "status": "gathering",
+        "source_priority": [
+          "solana-dev",
+          "context7"
+        ],
+        "claims": [
+          {
+            "id": "C1",
+            "claim": "A signer check asserts account_info.is_signer. In Anchor the `Signer<'info>` type enforces it, and `#[account(signer)]` is the constraint form for when the type cannot be used.",
+            "kind": "concept",
+            "mcp": "solana-dev",
+            "query": "Anchor signer constraint Signer type is_signer",
+            "verify": "both spellings still exist and the type is still the recommended one",
+            "status": "verified",
+            "evidence": "solana-dev: anchor account-constraints reference — '#[account(signer)] Checks the given account signed the transaction. Prefer the Signer type if signer is the only constraint needed'",
+            "value": null,
+            "recheck": "solana-dev: Solana_Documentation_Search 'Anchor signer constraint Signer type'",
+            "verified_on": "2026-09-07"
+          },
+          {
+            "id": "C2",
+            "claim": "An owner check compares account_info.owner against the expected program id; SPL Token's own check_account_owner returns IncorrectProgramId when it differs.",
+            "kind": "concept",
+            "mcp": "solana-dev",
+            "query": "check_account_owner IncorrectProgramId owner check Solana",
+            "verify": "the comparison and the error it returns, from a shipped program not a blog",
+            "status": "verified",
+            "evidence": "solana-dev: solana-program/token processor.rs — check_account_owner compares program_id against account_info.owner and returns ProgramError::IncorrectProgramId",
+            "value": null,
+            "recheck": "solana-dev: Solana_Documentation_Search 'check_account_owner IncorrectProgramId'",
+            "verified_on": "2026-09-07"
+          },
+          {
+            "id": "K3",
+            "claim": "With both checks added, the previous lesson's exploit test fails.",
+            "kind": "code",
+            "mcp": "local-execution",
+            "query": "re-run the m01 exploit against the hardened program",
+            "verify": "the same test that passed now fails — that reversal is the lesson's assessment",
+            "status": "gathering",
+            "evidence": "TODO: re-run the exploit test against the hardened build",
+            "value": null,
+            "recheck": "python3 tools/verify_challenges.py <course> then re-run the m01 exploit test"
+          }
+        ],
+        "code_to_ground": [
+          {
+            "id": "K1",
+            "what": "the Signer<'info> field and the owner comparison that close the hole",
+            "autofixer": "required",
+            "status": "gathering"
+          }
+        ],
+        "open_questions": [
+          "Show the raw is_signer form alongside Signer<'info>, or only the type? The raw form is what the learner will read in audits."
+        ],
+        "frozen_facts": [
+          "Signer<'info> enforces is_signer; #[account(signer)] is the constraint spelling.",
+          "An owner check is a comparison against the expected program id, and the canonical failure is IncorrectProgramId."
+        ]
       }
     },
     {
@@ -376,6 +502,77 @@
         "dominant_job": "derive-why",
         "voice_notes": "contested/intricate design → Vitalik craft over spine; derive why canonical bump is the only safe one.",
         "est_length": "1400 words / ~14 min"
+      },
+      "research": {
+        "lesson_id": "pda-and-bump-safety",
+        "status": "gathering",
+        "source_priority": [
+          "solana-dev",
+          "context7"
+        ],
+        "claims": [
+          {
+            "id": "C1",
+            "claim": "find_program_address searches bumps downward from 255 and returns the first that lands off the ed25519 curve — the canonical bump. create_program_address takes a caller-supplied bump and does not canonicalize it.",
+            "kind": "concept",
+            "mcp": "solana-dev",
+            "query": "find_program_address canonical bump create_program_address arbitrary bump",
+            "verify": "the search direction, the off-curve condition, and the difference between the two calls",
+            "status": "verified",
+            "evidence": "solana-dev: solana.com PDA-derivation page — 'bump 255 produces an on-curve address and fails. The first valid bump is 254, making it the canonical bump'; solana-sdk address/syscalls.rs documents create_program_address as the verification call for a supplied bump",
+            "value": null,
+            "recheck": "solana-dev: Solana_Documentation_Search 'find_program_address canonical bump'",
+            "verified_on": "2026-09-07"
+          },
+          {
+            "id": "C2",
+            "claim": "Taking a bump as an instruction argument and deriving with create_program_address lets an attacker mint several valid PDAs for one logical key. The fix is to derive with find_program_address and compare, or to store the canonical bump at init and check it on use.",
+            "kind": "concept",
+            "mcp": "solana-dev",
+            "query": "bump seed canonicalization attack sealevel non-canonical bump",
+            "verify": "the exploit and the recommended mitigation, from the canonical attack corpus",
+            "status": "verified",
+            "evidence": "solana-dev: sealevel-attacks 7-bump-seed-canonicalization (insecure/secure/recommended); Helius Hitchhiker's Guide — 'a malicious actor [could] create multiple PDAs with different bumps for the same user ID'",
+            "value": null,
+            "recheck": "solana-dev: Solana_Documentation_Search 'bump seed canonicalization sealevel'",
+            "verified_on": "2026-09-07"
+          },
+          {
+            "id": "C3",
+            "claim": "Seeds are hashed sequentially, so [b\"ab\", b\"cd\"] and [b\"abcd\"] derive the same address. Fixed-length seeds or a namespace prefix are the fix.",
+            "kind": "concept",
+            "mcp": "solana-dev",
+            "query": "PDA seed collision sequential hashing abcdef abc def",
+            "verify": "the collision is a property of the hashing, not a hypothetical",
+            "status": "verified",
+            "evidence": "solana-dev: find_program_address docs warn 'seeds {abcdef}, {abc, def}, and {ab, cd, ef} will all result in the same program address'",
+            "value": null,
+            "recheck": "solana-dev: Solana_Documentation_Search 'PDA seed collision sequential hash'",
+            "verified_on": "2026-09-07"
+          }
+        ],
+        "code_to_ground": [
+          {
+            "id": "K1",
+            "what": "storing the canonical bump at init and checking it on use",
+            "autofixer": "required",
+            "status": "gathering"
+          },
+          {
+            "id": "K2",
+            "what": "the crafted-seed rejection",
+            "autofixer": "required",
+            "status": "gathering"
+          }
+        ],
+        "open_questions": [
+          "Anchor's `bump = vault.bump` hides the create_program_address call. Show the raw derivation once so the constraint is not magic?"
+        ],
+        "frozen_facts": [
+          "The canonical bump is the first off-curve bump counting down from 255.",
+          "A user-supplied bump is a second valid PDA for the same seeds — an account-substitution hole.",
+          "Sequential seed hashing means unseparated variable-length seeds can collide."
+        ]
       }
     },
     {
@@ -422,6 +619,75 @@
         "dominant_job": "show-how",
         "voice_notes": "documented mechanisms → Helius expository; two clean beats, one new element each.",
         "est_length": "1400 words / ~14 min"
+      },
+      "research": {
+        "lesson_id": "arithmetic-and-cpi-safety",
+        "status": "gathering",
+        "source_priority": [
+          "solana-dev",
+          "context7"
+        ],
+        "claims": [
+          {
+            "id": "C1",
+            "claim": "Overflow and precision error is a named Solana attack class; balance math belongs in checked_add / checked_sub / checked_mul rather than bare operators.",
+            "kind": "concept",
+            "mcp": "solana-dev",
+            "query": "Solana arithmetic overflow precision errors attack class checked math",
+            "verify": "the class is published, and checked math is the stated mitigation",
+            "status": "verified",
+            "evidence": "solana-dev: Helius Hitchhiker's Guide — 'Arithmetic and Precision Errors: overflows/underflows and precision errors can be exploited for financial gain'",
+            "value": null,
+            "recheck": "solana-dev: Solana_Documentation_Search 'Solana arithmetic overflow attack checked math'",
+            "verified_on": "2026-09-07"
+          },
+          {
+            "id": "C2",
+            "claim": "Arbitrary CPI: invoking a caller-supplied program id lets an attacker substitute a malicious program. The fix compares the passed id against the known one before invoke, returning IncorrectProgramId, or uses a typed Program<'info, T>.",
+            "kind": "concept",
+            "mcp": "solana-dev",
+            "query": "arbitrary CPI validate program id before invoke sealevel",
+            "verify": "the insecure/secure pair, and that the guard is an id comparison",
+            "status": "verified",
+            "evidence": "solana-dev: sealevel-attacks 5-arbitrary-cpi — insecure invokes ctx.accounts.token_program.key unchecked; secure guards with `if &spl_token::ID != ctx.accounts.token_program.key { return Err(ProgramError::IncorrectProgramId) }`",
+            "value": null,
+            "recheck": "solana-dev: Solana_Documentation_Search 'arbitrary cpi sealevel secure IncorrectProgramId'",
+            "verified_on": "2026-09-07"
+          },
+          {
+            "id": "V3",
+            "claim": "Whether this course's release profile sets overflow-checks. A debug build panics on overflow; a release build without the flag wraps silently. Which one the lesson may assert depends on the course's own Cargo.toml, so check before writing either.",
+            "kind": "version-pin",
+            "mcp": "local-execution",
+            "query": "overflow-checks in the course workspace Cargo.toml",
+            "verify": "read the profile, then prove it with a build that overflows",
+            "status": "gathering",
+            "evidence": "TODO: not asserted until the profile is read — the wrapping-vs-panicking claim is exactly the kind that ships wrong",
+            "value": null,
+            "recheck": "grep -n 'overflow-checks' Cargo.toml && cargo build --release"
+          }
+        ],
+        "code_to_ground": [
+          {
+            "id": "K1",
+            "what": "the checked balance math",
+            "autofixer": "required",
+            "status": "gathering"
+          },
+          {
+            "id": "K2",
+            "what": "the program-id guard before the deposit CPI",
+            "autofixer": "required",
+            "status": "gathering"
+          }
+        ],
+        "open_questions": [
+          "Teach the raw id comparison, Anchor's Program<'info, Token>, or both? The audit reader needs the raw form; the builder reaches for the type."
+        ],
+        "frozen_facts": [
+          "Checked arithmetic returns Option; the unchecked operator is the footgun.",
+          "A caller-supplied program id is an attacker-supplied program id unless it is compared against a known one."
+        ]
       }
     },
     {
@@ -549,6 +815,74 @@
         "dominant_job": "motivate",
         "voice_notes": "course close; spine carries it; celebrate the auditor's eye, name the trade-off of speed vs patience.",
         "est_length": "1000 words / ~10 min"
+      },
+      "research": {
+        "lesson_id": "capstone-audit-ctf",
+        "status": "gathering",
+        "source_priority": [
+          "solana-dev",
+          "context7"
+        ],
+        "claims": [
+          {
+            "id": "C1",
+            "claim": "The checklist this capstone applies — access control, data validation, arithmetic and precision, CPI handling, PDA misuse — is the published taxonomy, not one assembled for the course.",
+            "kind": "concept",
+            "mcp": "solana-dev",
+            "query": "Solana program security attack vector taxonomy checklist",
+            "verify": "the categories the capstone grades against match a published list",
+            "status": "verified",
+            "evidence": "solana-dev: Helius Hitchhiker's Guide enumerates Logic Bugs, Data Validation Flaws, Rust-Specific Issues, Access Control Vulnerabilities, Arithmetic and Precision Errors, CPI Issues and PDA Misuse",
+            "value": null,
+            "recheck": "solana-dev: Solana_Documentation_Search 'Solana program security attack vectors'",
+            "verified_on": "2026-09-07"
+          },
+          {
+            "id": "A2",
+            "claim": "Which fuzz harness the regression test uses, and its exact invocation. Inherited from m03-l1, which has not resolved Trident vs the anchor-native path.",
+            "kind": "api",
+            "mcp": "context7",
+            "query": "Trident fuzz target macro; anchor fuzz subcommand",
+            "verify": "settle it once for the whole course — the capstone cannot teach a tool the lab did not",
+            "status": "gathering",
+            "evidence": "TODO: blocked on m03-l1 C2",
+            "value": null,
+            "recheck": "context7: query-docs anchor 'fuzz subcommand'; then `anchor fuzz --help`"
+          },
+          {
+            "id": "K3",
+            "claim": "The CTF program satisfies the platform contract: the starter fails at least one test and the solution passes every one.",
+            "kind": "code",
+            "mcp": "local-execution",
+            "query": "verify_challenges on the capstone",
+            "verify": "the contract the Academy runtime executes on every submission",
+            "status": "gathering",
+            "evidence": "TODO: run verify_challenges.py",
+            "value": null,
+            "recheck": "python3 tools/verify_challenges.py <course>"
+          }
+        ],
+        "code_to_ground": [
+          {
+            "id": "K1",
+            "what": "the unfamiliar vulnerable program the learner audits",
+            "autofixer": "required",
+            "status": "gathering"
+          },
+          {
+            "id": "K2",
+            "what": "the fuzz test that catches the regression",
+            "autofixer": "required",
+            "status": "gathering"
+          }
+        ],
+        "open_questions": [
+          "How many planted bugs? Too few and 'stop at the first' is not punished; too many and the capstone becomes a scavenger hunt."
+        ],
+        "frozen_facts": [
+          "The audit checklist here is the published attack taxonomy, applied in order.",
+          "A fuzz test only catches what its invariants assert — the findings list drives the invariants, not the other way round."
+        ]
       }
     }
   ],
